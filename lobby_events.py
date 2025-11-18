@@ -197,46 +197,83 @@ def on_enter_room(data):
 
 @socketio.on("leave_room")
 def on_leave_room(data):
-    """(수정) 플레이어가 '방 나가기'를 눌렀을 때 (버그 수정)"""
+    """(수정) 플레이어가 '방 나가기'를 눌렀을 때 (타이머 연동)"""
     room_id = data.get("roomId")
     uid = data.get("uid") 
     
     if not room_id or not uid or room_id not in rooms:
         return
 
-    gs = rooms.get(room_id)
-    player = find_player_by_uid(gs, uid)
-    
-    if not player:
-        return # 방에 없는 유저
-            
-    game_started = bool(gs.piles["black"] or gs.piles["white"])
-    
-    # (수정) sid가 아니라 player.sid를 사용
-    leave_room(room_id, sid=player.sid)
-    gs.players.remove(player)
-    print(f"<- 방 이탈: {player.name} left room {room_id}")
+    gs: GameState = rooms.get(room_id) # 👈 GameState 타입 힌트
+    if not gs: return
 
-    # (수정) 'pass' 대신 실제 로직 채움
+    player_to_remove = find_player_by_uid(gs, uid)
+    if not player_to_remove:
+        return # 방에 없는 유저
+
+    # [수정] 명시적인 game_started 플래그 사용
+    game_started = gs.game_started
+    player_was_on_turn = False
+    
+    # [중요] 플레이어가 방을 나가기 *전에* 현재 턴이었는지 확인
+    if game_started and gs.players and len(gs.players) > 0:
+        if gs.players[gs.current_turn].uid == player_to_remove.uid:
+            player_was_on_turn = True
+            
+            # [중요] 현재 턴 플레이어가 나갔으므로, 타이머 즉시 중지
+            if gs.turn_timer:
+                gs.turn_timer.cancel()
+                gs.turn_timer = None
+                print(f"[{room_id}] 턴 타이머 중지 (플레이어 퇴장).")
+            
+    # --- 플레이어 제거 ---
+    leave_room(room_id, sid=player_to_remove.sid)
+    gs.players.remove(player_to_remove)
+    print(f"<- 방 이탈: {player_to_remove.name} left room {room_id}")
+    # ---------------------
+
+    # --- 후속 처리 ---
     if game_started:
-        if gs.players:
-            if len(gs.players) == 1:
-                # [승리 처리]
-                winner = gs.players[0]
-                print(f"🏆 게임 종료! 승자: {winner.name}")
-                socketio.emit("game_over", {"winner": {"id": winner.id, "name": winner.name}}, room=room_id)
-                del rooms[room_id]
+        if len(gs.players) == 1:
+            # [승리 처리] 1명 남음
+            winner = gs.players[0]
+            print(f"🏆 게임 종료! 승자: {winner.name}")
+            socketio.emit("game_over", {"winner": {"id": winner.id, "name": winner.name}}, room=room_id)
+            
+            # [요청 사항] 방을 삭제하지 않고 게임 종료 상태로 둡니다.
+            gs.game_started = False
+            gs.turn_phase = "INIT"
+
+        elif len(gs.players) > 1:
+            # [게임 속행] 2명 이상 남음
+            # 턴 인덱스 보정 (나간 플레이어보다 뒷 순서였을 경우)
+            gs.current_turn %= len(gs.players)
+            
+            if player_was_on_turn:
+                # 턴 진행 중인 플레이어가 나갔으므로, 즉시 다음 턴 시작
+                print(f"[{room_id}] 턴 플레이어가 나갔으므로 다음 턴 시작.")
+                # (중요) 바로 다음 턴 함수 호출 (백그라운드)
+                socketio.start_background_task(start_next_turn, room_id)
             else:
-                # [턴 보정]
-                gs.current_turn %= len(gs.players)
-                broadcast_in_game_state(room_id) # (수정) room_id 전달
+                # 턴 진행 중이 아닌 플레이어가 나갔으므로, 상태만 갱신
+                broadcast_in_game_state(room_id)
+        
         else:
-            if room_id in rooms: del rooms[room_id]
+            # [방 삭제] 0명 남음 (게임 중)
+            print(f"[{room_id}] (게임 중) 모든 플레이어가 나가서 방 삭제")
+            if room_id in rooms: 
+                del rooms[room_id]
+
     else: 
+        # (게임 시작 전 로비)
         if gs.players:
-            # [로비: 방장 위임]
+            # [로비: 방장 위임] 1명 이상 남음
             for i, p in enumerate(gs.players):
                 p.id = i
             socketio.emit("room_state", serialize_state_for_lobby(gs), room=room_id)
+        
         else:
-            if room_id in rooms: del rooms[room_id]
+            # [방 삭제] 0명 남음 (로비)
+            print(f"[{room_id}] (로비) 모든 플레이어가 나가서 방 삭제")
+            if room_id in rooms: 
+                del rooms[room_id]

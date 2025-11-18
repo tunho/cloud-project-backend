@@ -123,7 +123,7 @@ def guess_tile(gs: GameState, guesser: Player, target_id: int, index: int, value
         return {"ok": False, "reason": "invalid-index"}
     tile = target.hand[index]
     if tile.revealed:
-        return {"ok": False, "reason": "already-revealed"}
+        return {"ok": False, "reason": "already-revealed", "correct": False}
 
     correct = tile.value == value
     if correct:

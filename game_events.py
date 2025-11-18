@@ -8,7 +8,7 @@ from extensions import socketio
 from models import GameState, Player, Color, TurnPhase
 from utils import (
     find_player_by_sid, get_room, 
-    broadcast_in_game_state, serialize_state_for_lobby # 👈 broadcast_in_game_state 필요
+    broadcast_in_game_state, serialize_state_for_lobby 
 )
 from game_logic import (
     prepare_tiles, deal_initial_hands, start_turn_from, 
@@ -17,7 +17,7 @@ from game_logic import (
 from typing import Optional
 
 
-TURN_TIMER_SECONDS = 20.0
+TURN_TIMER_SECONDS = 30.0
 
 # --- 헬퍼: 턴 관리 ---
 
