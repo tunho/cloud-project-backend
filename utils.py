@@ -17,6 +17,7 @@ def serialize_tile(t: Tile, is_self: bool = False) -> Dict[str, Any]:
             "value": None, # <- (보안) 값을 null로 보냄
             "isJoker": t.is_joker,
             "revealed": t.revealed,
+
         }
     
     # 본인 카드 또는 이미 공개된 카드

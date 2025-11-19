@@ -25,11 +25,19 @@ def broadcast_queue_status():
 
 @socketio.on("join_queue")
 def on_join_queue(data):
-    """(수정) 플레이어가 '게임 찾기'를 눌렀을 때 (uid 안전 처리)"""
     global queue
     sid = request.sid
-    name = data.get("name") or f"Player_{sid[:4]}"
+    bet_amount = data.get("betAmount", 0) # 기본값 100으로 가정
+    
+    # ▼▼▼ [추가된 필드 추출] ▼▼▼
     uid = data.get("uid")
+    name = data.get("name") or f"Player_{sid[:4]}"
+    
+    nickname = data.get("nickname", name) 
+    email = data.get("email", "N/A")
+    major = data.get("major", "N/A")
+    money = data.get("money", 0)  # 👈 money 추출
+    year = data.get("year", 0)
     if not uid:
         emit("error_message", {"message": "UID가 필요합니다."})
         return
@@ -40,7 +48,13 @@ def on_join_queue(data):
         return
     
     print(f"-> 큐 참가: {name} ({sid})")
-    queue.append({"sid": sid, "name": name, "uid": uid})
+    queue.append({
+        # ... (기존 필드) ...
+        "major": major,
+        "money": money,
+        "year": year,
+        "bet_amount": bet_amount # 👈 큐에 저장
+    })
     
     broadcast_queue_status()
     check_queue_match()
@@ -73,14 +87,23 @@ def check_queue_match():
         for i, player_data in enumerate(players_to_match_data):
             player = Player(
                 sid=player_data["sid"],
-                uid=player_data["uid"], # uid 포함
+                uid=player_data["uid"], 
                 id=i,
                 name=player_data["name"],
+                
+                # ▼▼▼ [Player 객체에 money 반영] ▼▼▼
+                nickname=player_data["nickname"],
+                email=player_data["email"],
+                major=player_data["major"],
+                money=player_data["money"],  # 👈 money 반영
+                year=player_data["year"],
+                bet_amount=player_data["bet_amount"], # 👈 Player에게 할당
+                # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+                
                 hand=[],
                 last_drawn_index=None
             )
             players_to_match.append(player)
-            player_names.append(player.name)
             
         gs.players = players_to_match
         
@@ -103,8 +126,15 @@ def check_queue_match():
 def on_create_room(data):
     """(수정) 플레이어가 '방 만들기'를 요청할 때"""
     sid = request.sid
-    name = data.get("name") or f"Player_{sid[:4]}"
     uid = data.get("uid")
+    
+    # ▼▼▼ [추가된 필드 추출] ▼▼▼
+    name = data.get("name") or f"Player_{sid[:4]}"
+    nickname = data.get("nickname", name)
+    email = data.get("email", "N/A")
+    major = data.get("major", "N/A")
+    money = data.get("money", 0)  # 👈 money 추출
+    year = data.get("year", 0)
 
     if not uid:
         emit("error_message", {"message": "UID가 필요합니다."})
@@ -122,8 +152,14 @@ def on_create_room(data):
         uid=uid, 
         id=0, 
         name=name,
+        nickname=nickname,
+        email=email,
+        major=major,
+        money=money,  # 👈 money 반영
+        year=year,
         hand=[],
-        last_drawn_index=None
+        last_drawn_index=None,
+        bet_amount=0,  # 👈 커스텀 방이므로 베팅 금액은 0
     )
     gs.players.append(host_player)
     
@@ -142,8 +178,14 @@ def on_enter_room(data):
     """(수정) 플레이어가 방에 입장 (로직 정리)"""
     room_id = data.get("roomId")
     uid = data.get("uid")
+    
+    # ▼▼▼ [추가된 필드 추출] ▼▼▼
     name = data.get("name") or f"Player_{request.sid[:4]}"
-
+    nickname = data.get("nickname", name)
+    email = data.get("email", "N/A")
+    major = data.get("major", "N/A")
+    money = data.get("money", 0)  # 👈 money 추출
+    year = data.get("year", 0)
     if not room_id or not uid or room_id not in rooms:
         emit("error_message", {"message": "존재하지 않는 방입니다."})
         return
@@ -183,8 +225,14 @@ def on_enter_room(data):
         uid=uid,
         id=len(gs.players),
         name=name,
+        nickname=nickname,
+        email=email,
+        major=major,
+        money=money,  # 👈 money 반영
+        year=year,
         hand=[],
-        last_drawn_index=None
+        last_drawn_index=None,
+        bet_amount=0,  # 👈 커스텀 방이므로 베팅 금액은 0
     )
     gs.players.append(new_player)
     join_room(room_id, sid=request.sid)

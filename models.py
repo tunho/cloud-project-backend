@@ -24,14 +24,25 @@ class Tile:
     is_joker: bool
     revealed: bool = False
 
+
 @dataclass
 class Player:
-    sid: str          # 현재 연결된 세션 ID (바뀔 수 있음)
-    uid: str          # (필수) Firebase 계정 ID (영구적)
-    id: int           # 방 안에서의 인덱스 (0,1,2,...)
+    sid: str
+    uid: str
+    id: int
     name: str
-    hand: List[Tile]
+    hand: List[Any] = field(default_factory=list)
     last_drawn_index: Optional[int] = None
+    
+    # ▼▼▼ [최종 포함 필드] ▼▼▼
+    email: str = ""
+    major: str = ""
+    money: int = 0  # 👈 money 필드 추가
+    nickname: str = ""
+    year: int = 0
+    bet_amount: int = 0
+    final_rank: int = 0
+    
 
 @dataclass
 class GameState:
@@ -46,3 +57,5 @@ class GameState:
     game_started: bool = False # 로비/게임 구분
     turn_phase: TurnPhase = "INIT"
     turn_timer: Optional[Timer] = None
+    elimination_count: int = 0
+    
