@@ -49,11 +49,17 @@ def on_join_queue(data):
     
     print(f"-> 큐 참가: {name} ({sid})")
     queue.append({
-        # ... (기존 필드) ...
+        # ▼▼▼ [수정됨] sid와 uid를 명시적으로 저장 ▼▼▼
+        "sid": sid,             # 👈 [필수] 이 키를 추가합니다.
+        "uid": uid,             # 👈 [필수] 이 키도 추가합니다.
+        # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
+        "name": name,
+        "nickname": nickname,
+        "email": email,
         "major": major,
         "money": money,
         "year": year,
-        "bet_amount": bet_amount # 👈 큐에 저장
+        "bet_amount": bet_amount
     })
     
     broadcast_queue_status()
@@ -69,13 +75,14 @@ def on_leave_queue():
     emit("queue_status", {"status": "idle"}, to=sid)
     broadcast_queue_status()
 
+# lobby_events.py
+
 def check_queue_match():
-    """대기열을 확인하여 4명이 모이면 게임을 시작시킴"""
+    """대기열을 확인하여 4명이 모이면 게임을 시작시킴 (안전 버전)"""
     global queue
     
     if len(queue) >= 4:
-        print("🎉 매칭 성공! 4명 대기 중.")
-        
+        # 1. 일단 4명을 꺼냄
         players_to_match_data = [queue.pop(0) for _ in range(4)]
         
         room_id = str(uuid.uuid4())[:8]
@@ -83,43 +90,93 @@ def check_queue_match():
         
         players_to_match = []
         player_names = []
-        
+        valid_players_count = 0
+
         for i, player_data in enumerate(players_to_match_data):
+            # Player 객체 생성
             player = Player(
                 sid=player_data["sid"],
                 uid=player_data["uid"], 
                 id=i,
                 name=player_data["name"],
-                
-                # ▼▼▼ [Player 객체에 money 반영] ▼▼▼
                 nickname=player_data["nickname"],
                 email=player_data["email"],
                 major=player_data["major"],
-                money=player_data["money"],  # 👈 money 반영
+                money=player_data["money"],
                 year=player_data["year"],
-                bet_amount=player_data["bet_amount"], # 👈 Player에게 할당
-                # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-                
+                bet_amount=player_data["bet_amount"],
                 hand=[],
                 last_drawn_index=None
             )
-            players_to_match.append(player)
             
-        gs.players = players_to_match
-        
-        for player in players_to_match:
-            join_room(room_id, sid=player.sid)
-            match_data = {
+            # ▼▼▼ [중요] 강제 입장 시도 (예외 처리) ▼▼▼
+            try:
+                join_room(room_id, sid=player.sid)
+                # 성공적으로 방에 들어간 경우에만 리스트에 추가
+                players_to_match.append(player)
+                player_names.append(player.nickname)
+                valid_players_count += 1
+                
+                # 매칭 성공 메시지 전송
+                match_data = {
+                    "roomId": room_id,
+                    "players": [] # 아직 다 안 찼으므로 나중에 보낼 수도 있음 (일단 비워둠 or 현재까지 이름)
+                }
+                # 여기서 보내지 말고 4명 다 성공하면 보내는 게 나음
+                
+            except KeyError:
+                # 이미 연결이 끊긴 유령 플레이어
+                print(f"⚠️ 매칭 실패: {player.name} ({player.sid}) 유저가 연결되지 않음.")
+                # 이 유저는 버립니다.
+            except Exception as e:
+                print(f"⚠️ 입장 오류: {e}")
+
+        # 2. 4명 모두 정상적으로 방에 들어갔는지 확인
+        if valid_players_count == 4:
+            print(f"🎉 매칭 확정! 방 ID: {room_id}")
+            
+            # GameState에 플레이어 등록
+            gs.players = players_to_match
+            
+            # 각 플레이어에게 매칭 성공 신호 전송
+            final_match_data = {
                 "roomId": room_id,
-                "players": player_names 
+                "players": player_names
             }
-            emit("match:success", match_data, to=player.sid)
+            socketio.emit("match:success", final_match_data, room=room_id)
 
-        print(f"🚪 방 생성 {room_id}. 플레이어: {', '.join(player_names)}")
+            print(f"🚪 방 생성 {room_id}. 플레이어: {', '.join(player_names)}")
+            broadcast_queue_status()
 
-        broadcast_queue_status()
+            # 게임 시작
+            socketio.start_background_task(start_game_flow, room_id)
+            
+        else:
+            # 🚨 4명이 안 모임 (누군가 튕김) -> 매칭 취소 및 롤백
+            print("❌ 매칭 실패: 플레이어 중 일부가 연결이 끊겨 매칭이 취소되었습니다.")
+            
+            # 방금 만든 방 삭제
+            if room_id in rooms:
+                del rooms[room_id]
+            
+            # 정상적인 플레이어들은 다시 대기열의 '맨 앞'으로 돌려보냄 (우선순위 보장)
+            # 거꾸로 넣어야 순서가 유지됨
+            for p in reversed(players_to_match):
+                # 원래 데이터 형태로 복구
+                original_data = {
+                    "sid": p.sid, "uid": p.uid, "name": p.name,
+                    "nickname": p.nickname, "email": p.email, "major": p.major,
+                    "money": p.money, "year": p.year, "bet_amount": p.bet_amount
+                }
+                queue.insert(0, original_data)
+                
+                # 방금 들어갔던 방에서 나오게 함
+                leave_room(room_id, sid=p.sid)
 
-        socketio.start_background_task(start_game_flow, room_id)
+            broadcast_queue_status()
+            
+            # (선택) 다시 매칭 시도할지 여부
+            # check_queue_match() # 재귀 호출은 위험할 수 있으니 일단 대기
 
 
 @socketio.on("create_room")

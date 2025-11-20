@@ -115,23 +115,46 @@ def auto_place_drawn_tile(gs: GameState, player: Player):
     gs.pending_placement = False
     gs.can_place_anywhere = False
 
+# game_logic.py
+
 def guess_tile(gs: GameState, guesser: Player, target_id: int, index: int, value: Optional[int]):
     target = next((p for p in gs.players if p.id == target_id), None)
+    
+    # 1. 에러 처리 (correct: False 포함)
     if not target:
-        return {"ok": False, "reason": "invalid-player"}
+        return {"ok": False, "reason": "invalid-player", "correct": False}
     if index < 0 or index >= len(target.hand):
-        return {"ok": False, "reason": "invalid-index"}
+        return {"ok": False, "reason": "invalid-index", "correct": False}
     tile = target.hand[index]
     if tile.revealed:
         return {"ok": False, "reason": "already-revealed", "correct": False}
 
+    # 2. 정답 여부 확인
     correct = tile.value == value
+    
     if correct:
         tile.revealed = True
-        return {"ok": True, "correct": True}
+        # ▼▼▼ [수정] 정답 시 실제 타일 정보(actual_tile) 반환 ▼▼▼
+        return {
+            "ok": True, 
+            "correct": True, 
+            "actual_tile": tile  # (Tile 객체 그대로 반환, emit 시 to_dict 처리됨)
+        }
     
+    # 3. 오답 처리 (페널티)
+    penalty_tile = None
     unrevealed_cards = [t for t in guesser.hand if not t.revealed]
+    
     if unrevealed_cards:
+        # 내 카드 중 하나를 랜덤으로 공개
         card_to_reveal = random.choice(unrevealed_cards)
         card_to_reveal.revealed = True
-    return {"ok": True, "correct": False}
+        penalty_tile = card_to_reveal # 페널티 타일 정보 저장
+
+    # ▼▼▼ [수정] 오답 시 페널티 타일 정보 반환 ▼▼▼
+    # (주의: 오답일 때는 target의 actual_tile을 반환하면 안 됩니다! 보안상 클라이언트가 몰라야 함)
+    return {
+        "ok": True, 
+        "correct": False, 
+        "penalty_tile": penalty_tile 
+    }

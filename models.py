@@ -9,12 +9,12 @@ Color = Literal["black", "white"]
 
 TurnPhase = Literal[
     "INIT", 
-    "DRAWING",        # 타일 드로우 대기
-    "PLACE_JOKER",    # 조커 배치 대기
-    "GUESSING",       # 추리 대기
-    "POST_SUCCESS_GUESS" # 추리 성공 후 연속 진행 여부 대기
+    "DRAWING",        
+    "PLACE_JOKER",    
+    "GUESSING",       
+    "POST_SUCCESS_GUESS",
+    "ANIMATING_GUESS" # 👈 [추가] 추리 결과 애니메이션 재생 중
 ]
-
 
 @dataclass
 class Tile:
@@ -23,6 +23,15 @@ class Tile:
     value: Optional[int]  # 조커는 None
     is_joker: bool
     revealed: bool = False
+
+    def to_dict(self):
+        return {
+            "id": self.id,
+            "color": self.color,
+            "value": self.value,
+            "is_joker": self.is_joker,
+            "revealed": self.revealed
+        }
 
 
 @dataclass

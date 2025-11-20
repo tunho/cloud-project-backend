@@ -14,7 +14,15 @@ def on_disconnect():
     print("🔴 disconnect:", request.sid)
     
     global queue
+    original_len = len(queue)
     queue = [p for p in queue if p["sid"] != request.sid]
+
+
+    queue = [p for p in queue if p["sid"] != sid]
+    
+    if len(queue) < original_len:
+        print(f"👋 연결 끊김: 대기열에서 {sid} 제거됨.")
+        broadcast_queue_status()
 
     for room_id, gs in list(rooms.items()):
         player = find_player_by_sid(gs, request.sid)

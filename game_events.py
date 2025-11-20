@@ -7,7 +7,7 @@ from extensions import socketio
 from state import rooms
 from models import GameState, Player, Color, TurnPhase, Optional # 👈 TurnPhase 임포트
 from utils import (
-    find_player_by_sid, get_room, 
+    find_player_by_sid, find_player_by_uid, get_room, 
     broadcast_in_game_state, serialize_state_for_lobby
 )
 from game_logic import (
@@ -83,9 +83,10 @@ def start_next_turn(room_id: str):
         # 👈 [복구] 더미가 있으면 '드로우' 단계
         set_turn_phase(room_id, "DRAWING")
 
-def set_turn_phase(room_id: str, phase: TurnPhase):
+def set_turn_phase(room_id: str, phase: TurnPhase, broadcast: bool = True):
     """
     (수정) 지정된 페이즈로 상태 변경 (DRAWING 로직 포함)
+    broadcast: False이면 상태 전송을 건너뜀 (애니메이션 등 특수 상황용)
     """
     gs = get_room(room_id)
     player = get_current_player(gs)
@@ -106,11 +107,11 @@ def set_turn_phase(room_id: str, phase: TurnPhase):
     
     print(f"[{room_id}] {player.name} 님의 페이즈 변경 -> {phase}")
 
-    # 3. 클라이언트에 현재 턴 정보 전송
+    # 3. 클라이언트에 현재 턴 정보 전송 (페이즈 변경 알림은 항상 전송)
     emit_data = {
             "phase": phase,
             "timer": TURN_TIMER_SECONDS,
-            "currentTurnUid": player.uid # 👈 누가 턴인지 명시 (프론트에서 내 턴인지 구분용)
+            "currentTurnUid": player.uid 
         }
     
     # 👈 [복구] DRAWING 단계일 때만 뽑을 수 있는 타일 정보 전송
@@ -121,9 +122,18 @@ def set_turn_phase(room_id: str, phase: TurnPhase):
         emit_data["available_piles"] = available_piles
 
     socketio.emit("game:turn_phase_start", emit_data, room=room_id)
+
+    if phase != "ANIMATING_GUESS": 
+        gs.turn_timer = Timer(
+            TURN_TIMER_SECONDS,
+            lambda: handle_timeout(room_id, player.uid, phase)
+        )
+        gs.turn_timer.start()
+
     
-    # 4. 전체 상태 브로드캐스트
-    broadcast_in_game_state(room_id)
+    # 4. 전체 상태 브로드캐스트 (옵션)
+    if broadcast:
+        broadcast_in_game_state(room_id)
 
     # 5. 새 타이머 시작
     gs.turn_timer = Timer(
@@ -313,7 +323,7 @@ def on_place_joker(data):
 
 @socketio.on("guess_value")
 def on_guess_value(data):
-    """(수정) 추리 (요청 사항 반영)"""
+    """(수정) 추리 요청 처리 -> 애니메이션 페이즈 시작"""
     room_id = data.get("roomId")
     if not room_id: return
     
@@ -326,34 +336,46 @@ def on_guess_value(data):
         return emit("error_message", {"message": "지금은 추리할 수 없습니다."})
 
     if gs.turn_timer: gs.turn_timer.cancel()
+    gs.turn_timer = None
 
     target_id = data.get("targetId")
     index = data.get("index")
     value = data.get("value")
 
+    # 1. 추리 로직 실행 (상태 변경됨: tile.revealed = True 등)
     result = guess_tile(gs, player, target_id, index, value)
+
+    # 2. 애니메이션 페이즈로 설정 (상태 브로드캐스트 생략 -> 애니메이션 종료 후 전송)
+    set_turn_phase(room_id, "ANIMATING_GUESS", broadcast=False)
     
-    # [수정] 결과 브로드캐스트 (카드 공개 처리용)
-    socketio.emit("game:guess_result", {
+    # 3. 애니메이션 시작 이벤트 전송 (결과 포함)
+    # 실제 타일 정보는 정답일 경우 target의 타일, 오답일 경우 guesser의 페널티 타일
+    revealed_tile_data = None
+    if result["correct"]:
+        t = result.get("actual_tile")
+        if t: revealed_tile_data = t.to_dict()
+    else:
+        t = result.get("penalty_tile")
+        if t: revealed_tile_data = t.to_dict()
+
+    socketio.emit("game:start_guess_animation", {
         "guesser_id": player.id,
         "target_id": target_id,
         "index": index,
         "value": value,
-        "correct": result["correct"]
+        "correct": result["correct"],
+        "revealed_tile": revealed_tile_data # 애니메이션 오버레이에서 보여줄 타일 정보 (dict)
     }, room=room_id)
 
-    broadcast_in_game_state(room_id) # 갱신된 카드 상태 전송
-
-    if result["correct"]:
-        # 3-1. (성공) -> 연속 추리 단계
-        set_turn_phase(room_id, "POST_SUCCESS_GUESS")
-        # [요청 사항] 프론트에 "계속 하시겠습니까?" 프롬프트 표시 요청
-        socketio.emit("game:prompt_continue", 
-                      {"timer": TURN_TIMER_SECONDS}, 
-                      to=player.sid)
-    else:
-        # 3-2. (실패) -> 다음 턴
-        start_next_turn(room_id)
+    # 중요: 여기서 broadcast_in_game_state를 호출하지 않음! 
+    # (애니메이션이 끝난 후 on_animation_done에서 호출)
+    
+    # 4. 결과 처리를 위해 임시 저장 (선택 사항, 혹은 on_animation_done에서 판단)
+    # 여기서는 간단히 on_animation_done에서 correct 여부를 클라이언트가 보내주는 것을 검증하거나
+    # 서버가 기억하는 방식을 쓸 수 있음. 
+    # 보안을 위해 서버 세션/상태에 저장하는 것이 좋으나, 
+    # 일단 간단히 클라이언트가 보내는 correct 값을 믿되, 
+    # 실제 게임 로직(guess_tile)은 이미 실행되었으므로 상태는 일관성 있음.
 
 
 @socketio.on("stop_guessing")
@@ -422,3 +444,51 @@ def handle_winnings(room_id: str):
     socketio.emit("game:payout_result", payout_results, room=room_id)
     
     print(f"[{room_id}] 게임 정산 완료. 순위별 정산 처리됨.")
+
+@socketio.on("game:animation_done")
+def on_animation_done(data):
+    """클라이언트가 추리 결과 애니메이션을 완료했을 때 호출됨"""
+    room_id = data.get("roomId")
+    guesser_uid = data.get("guesserUid") 
+    correct = data.get("correct") 
+
+    if not room_id or not guesser_uid: return
+    
+    gs = get_room(room_id)
+    player = find_player_by_uid(gs, guesser_uid)
+    
+    # 검증: 현재 턴 플레이어만 이 신호를 보낼 수 있게 함 (중복 처리 방지)
+    if not player or gs.players[gs.current_turn].uid != player.uid:
+        return 
+
+    if gs.turn_phase != "ANIMATING_GUESS":
+        # 이미 처리되었거나 페이즈가 안 맞으면 무시
+        return
+
+    print(f"[{room_id}] {player.nickname} 애니메이션 완료. 결과: {correct}")
+
+    # 1. 이제서야 변경된 상태(타일 공개 등)를 모두에게 알림
+    broadcast_in_game_state(room_id)
+
+    # 2. 결과에 따른 분기
+    if correct:
+        # 정답 -> 연속 추리 기회
+        set_turn_phase(room_id, "POST_SUCCESS_GUESS")
+        socketio.emit("game:prompt_continue", 
+                      {"timer": TURN_TIMER_SECONDS}, 
+                      to=player.sid)
+    else:
+        # 오답 -> 턴 종료 및 다음 사람
+        start_next_turn(room_id)
+
+@socketio.on("request_game_state")
+def on_request_game_state(data):
+    """(신규) 프론트엔드가 게임 페이지 로드 직후 호출하는 함수"""
+    room_id = data.get("roomId")
+    if not room_id: return
+
+    # 현재 게임 상태 전체를 브로드캐스트 (혹은 요청자에게만 전송)
+    # broadcast_in_game_state 함수가 이미 구현되어 있으므로 활용
+    broadcast_in_game_state(room_id)
+    
+    print(f"[{room_id}] 클라이언트의 요청으로 게임 상태 동기화 전송")
