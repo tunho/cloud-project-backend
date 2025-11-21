@@ -51,6 +51,7 @@ class Player:
     year: int = 0
     bet_amount: int = 0
     final_rank: int = 0
+    settled: bool = False  # 👈 정산 완료 여부
     
 
 @dataclass
@@ -67,4 +68,5 @@ class GameState:
     turn_phase: TurnPhase = "INIT"
     turn_timer: Optional[Timer] = None
     elimination_count: int = 0
+    turn_start_time: float = 0.0 # 👈 턴 시작 시간 (서버 타임스탬프)
     

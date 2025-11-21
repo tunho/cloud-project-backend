@@ -130,9 +130,20 @@ def guess_tile(gs: GameState, guesser: Player, target_id: int, index: int, value
         return {"ok": False, "reason": "already-revealed", "correct": False}
 
     # 2. 정답 여부 확인
-    correct = tile.value == value
+    # 🔥 [FIXED] Joker 추리: value가 12(numeric), "JOKER" 또는 "joker"이고 tile.is_joker가 True이면 정답
+    is_correct = False
     
-    if correct:
+    # 🔥 [DEBUG] 조커 추리 로깅
+    print(f"🎯 Guess: tile.is_joker={tile.is_joker}, tile.value={tile.value}, guess_value={value}")
+    
+    if tile.is_joker and (value == 12 or value == "JOKER" or value == "joker" or str(value).upper() == "JOKER"):
+        is_correct = True
+        print(f"✅ 조커 추리 정답!")
+    elif not tile.is_joker and tile.value == value:
+        is_correct = True
+        print(f"✅ 숫자 추리 정답!")
+    
+    if is_correct:
         tile.revealed = True
         # ▼▼▼ [수정] 정답 시 실제 타일 정보(actual_tile) 반환 ▼▼▼
         return {
@@ -158,3 +169,13 @@ def guess_tile(gs: GameState, guesser: Player, target_id: int, index: int, value
         "correct": False, 
         "penalty_tile": penalty_tile 
     }
+
+def is_player_eliminated(player: Player) -> bool:
+    """플레이어의 모든 카드가 공개되었는지 확인"""
+    if not player.hand:
+        return True # 카드가 없으면 탈락 취급 (혹은 초기 상태)
+    return all(t.revealed for t in player.hand)
+
+def get_alive_players(gs: GameState) -> List[Player]:
+    """탈락하지 않은 플레이어 목록 반환"""
+    return [p for p in gs.players if not is_player_eliminated(p)]

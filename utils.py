@@ -3,6 +3,11 @@ from typing import Dict, Any, Optional
 from models import Tile, Player, GameState
 from state import rooms
 from extensions import socketio
+import time # 👈 time 임포트
+
+# 🔥 [FIX] 순환 참조 방지를 위해 상수 직접 정의하거나 game_events에서 가져오지 않음
+# (game_events가 utils를 임포트하므로 여기서 game_events를 임포트하면 안됨)
+TURN_TIMER_SECONDS = 60
 
 # ▼▼▼ (핵심 수정 1) ▼▼▼
 # 'is_self' 플래그를 추가하여 본인 패가 아니면 값을 은닉합니다.
@@ -34,9 +39,14 @@ def serialize_tile(t: Tile, is_self: bool = False) -> Dict[str, Any]:
 def serialize_player(p: Player, is_self: bool = False) -> Dict[str, Any]:
     return {
         "sid": p.sid,
-        "uid": p.uid, # (이전 수정사항 반영)
+        "uid": p.uid,
         "id": p.id,
         "name": p.name,
+        "nickname": p.nickname, # 🔥 [추가]
+        "major": p.major,       # 🔥 [추가]
+        "year": p.year,         # 🔥 [추가]
+        "money": p.money,       # 🔥 [추가]
+        "betAmount": p.bet_amount, # 🔥 [추가] 베팅 금액
         "hand": [serialize_tile(t, is_self) for t in p.hand],
         "lastDrawnIndex": p.last_drawn_index,
     }
@@ -118,6 +128,8 @@ def broadcast_in_game_state(room_id: str):
 
             # (보안) '뽑은 타일'은 현재 턴인 사람에게만 값을 보여줌
             "drawnTile": serialize_tile(gs.drawn_tile, is_self=is_current_turn_player),
+            "phase": gs.turn_phase, # 🔥 [FIX] Refresh 시 페이즈 정보 전송
+            "remainingTime": max(0, TURN_TIMER_SECONDS - (time.time() - gs.turn_start_time)) if gs.turn_start_time else 0, # 🔥 [NEW] 남은 시간 전송
         }
         
         # 'state_update' 이벤트로 개인화된 상태 전송

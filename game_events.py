@@ -1,5 +1,6 @@
 # game_events.py
 import random
+import time # 👈 time 임포트
 from threading import Timer
 from flask import request
 from flask_socketio import emit
@@ -12,11 +13,18 @@ from utils import (
 )
 from game_logic import (
     prepare_tiles, deal_initial_hands, start_turn_from, 
-    auto_place_drawn_tile, guess_tile
+    auto_place_drawn_tile, guess_tile, is_player_eliminated, get_alive_players
 )
 
-
-
+# 🔥 Firebase Admin SDK 임포트
+try:
+    from firebase_admin_config import get_db
+    from firebase_admin import firestore as admin_firestore
+    FIREBASE_AVAILABLE = True
+    print("✅ Firebase Admin imported successfully")
+except Exception as e:
+    FIREBASE_AVAILABLE = False
+    print(f"⚠️ Firebase Admin not available: {e}")
 
 
 
@@ -60,16 +68,39 @@ def start_game_flow(room_id: str):
 
 
 def start_next_turn(room_id: str):
-    """(수정) 다음 턴을 시작 (드로우 또는 추리)"""
+    """(수정) 다음 턴을 시작 (드로우 또는 추리) - 플레이어 퇴장 시에도 안정적"""
     gs = get_room(room_id)
     if not gs: return
 
-
-    # ... (게임 종료 조건 체크) ...
+    # 🔥 [수정] 생존자 먼저 확인
+    active_players_count = len(get_alive_players(gs))
     
-    gs.current_turn = (gs.current_turn + 1) % len(gs.players)
+    # 생존자가 1명 이하면 게임 종료되어야 하므로 턴 시작 안 함
+    if active_players_count <= 1:
+        print(f"[{room_id}] 생존자 {active_players_count}명, 게임 종료 조건")
+        return
+
+    # 🔥 [수정] 다음 생존 플레이어 찾기 (안전한 루프)
+    attempts = 0
+    max_attempts = len(gs.players)
+    
+    while attempts < max_attempts:
+        gs.current_turn = (gs.current_turn + 1) % len(gs.players)
+        next_player = gs.players[gs.current_turn]
+        
+        # final_rank가 0인 사람만 턴을 가질 수 있음 (0 = 생존, >0 = 탈락)
+        if next_player.final_rank == 0:
+            break
+        attempts += 1
+    else:
+        # 루프를 다 돌았는데도 생존자가 없다면 (비정상)
+        print(f"[{room_id}] ❌ ERROR: 턴을 넘길 생존자가 없습니다.")
+        return
+
     player = get_current_player(gs)
-    if not player: return
+    if not player: 
+        print(f"[{room_id}] ❌ ERROR: 현재 플레이어를 찾을 수 없습니다.")
+        return
 
     print(f"--- 턴 시작 ({player.name}) ---")
     
@@ -123,27 +154,22 @@ def set_turn_phase(room_id: str, phase: TurnPhase, broadcast: bool = True):
 
     socketio.emit("game:turn_phase_start", emit_data, room=room_id)
 
-    if phase != "ANIMATING_GUESS": 
+    # 4. 전체 상태 브로드캐스트 (옵션)
+    if broadcast:
+        broadcast_in_game_state(room_id)
+
+    # 5. 새 타이머 시작 (ANIMATING_GUESS 제외)
+    if phase != "ANIMATING_GUESS":
+        gs.turn_start_time = time.time() # 🔥 [NEW] 턴 시작 시간 기록
         gs.turn_timer = Timer(
             TURN_TIMER_SECONDS,
             lambda: handle_timeout(room_id, player.uid, phase)
         )
         gs.turn_timer.start()
 
-    
-    # 4. 전체 상태 브로드캐스트 (옵션)
-    if broadcast:
-        broadcast_in_game_state(room_id)
-
-    # 5. 새 타이머 시작
-    gs.turn_timer = Timer(
-        TURN_TIMER_SECONDS,
-        lambda: handle_timeout(room_id, player.uid, phase)
-    )
-    gs.turn_timer.start()
 
 def handle_timeout(room_id: str, player_uid: str, expected_phase: TurnPhase):
-    """(수정) 20초 타임아웃 처리 (DRAWING 타임아웃 복구)"""
+    """(수정) 타임아웃 처리 -> 기권(탈주) 처리"""
     gs = rooms.get(room_id)
 
     if not gs:
@@ -156,246 +182,83 @@ def handle_timeout(room_id: str, player_uid: str, expected_phase: TurnPhase):
         print(f"타임아웃 무시: (uid: {player_uid}, phase: {expected_phase})")
         return
 
-    print(f"⏰ 타임아웃 발생! {player.name} / {expected_phase}")
+    print(f"⏰ 타임아웃 발생! {player.name} / {expected_phase} -> 기권 처리")
     
-    # 👈 [복구] 드로우 타임아웃 로직
-    if expected_phase == "DRAWING":
-        # 1. 강제 드로우 (남아있는 색상 중 랜덤)
-        color: Color = "black"
-        available_piles = []
-        if gs.piles["black"]: available_piles.append("black")
-        if gs.piles["white"]: available_piles.append("white")
+    # 🔥 [수정] 시간 초과 시 강제 퇴장(패배) 처리
+    # on_leave_game 로직을 재사용하기 위해 소켓 이벤트 핸들러 호출과 유사하게 처리
+    # 단, request context가 없을 수 있으므로 로직을 분리하거나 직접 처리해야 함.
+    # 여기서는 on_leave_game을 직접 호출하기 어려우므로(request.sid 의존), 
+    # 핵심 로직을 수행하고 턴을 넘김.
+
+    # 1. 모든 카드 공개
+    for tile in player.hand:
+        tile.revealed = True
+    
+    # 2. 탈락 처리
+    if player.final_rank == 0:
+        alive_players = get_alive_players(gs)
+        alive_count = len(alive_players)
+        player.final_rank = alive_count + 1
         
-        if available_piles:
-            color = random.choice(available_piles)
-        
-        t = start_turn_from(gs, player, color)
-        if t and not t.is_joker:
-            auto_place_drawn_tile(gs, player)
-            set_turn_phase(room_id, "GUESSING")
-        elif t and t.is_joker:
-            # 조커는 강제로 맨 뒤에 배치 (타임아웃 시)
-            player.hand.append(t)
-            gs.drawn_tile = None
-            gs.pending_placement = False
-            set_turn_phase(room_id, "GUESSING")
-        else:
-            set_turn_phase(room_id, "GUESSING")
+        socketio.emit("game:player_eliminated", {
+            "uid": player.uid,
+            "nickname": player.nickname,
+            "rank": player.final_rank
+        }, room=room_id)
+
+        # 즉시 패배 정산
+        if not player.settled:
+            net_change = -player.bet_amount
+            player.money += net_change
+            player.settled = True
             
-    elif expected_phase == "PLACE_JOKER":
-        # 2. 조커 강제 배치 (맨 뒤)
-        t = gs.drawn_tile
-        if t:
-            player.hand.append(t)
-        set_turn_phase(room_id, "GUESSING")
+            # 🔥 [NEW] Firestore 업데이트 (타임아웃 패널티)
+            if FIREBASE_AVAILABLE:
+                try:
+                    db = get_db()
+                    if db:
+                        user_ref = db.collection('users').document(player.uid)
+                        user_ref.update({
+                            'money': admin_firestore.Increment(net_change)
+                        })
+                        print(f"💰 Firestore updated (timeout): {player.nickname} {net_change:+d}")
+                except Exception as e:
+                    print(f"❌ Firestore error: {e}")
+            
+            socketio.emit("game:payout_result", [{
+                "uid": player.uid,
+                "nickname": player.nickname,
+                "rank": player.final_rank,
+                "bet": player.bet_amount,
+                "net_change": net_change,
+                "new_total": player.money
+            }], room=room_id)
 
-    elif expected_phase == "GUESSING" or expected_phase == "POST_SUCCESS_GUESS":
-        # 3. 추리/연속추리 타임아웃 -> 턴 강제 종료
-        socketio.emit("game:action_timeout", 
-                      {"message": "시간 초과! 턴이 종료됩니다."}, 
-                      to=player.sid)
-        start_next_turn(room_id)
+    # 3. 상태 업데이트 (카드 공개됨)
+    broadcast_in_game_state(room_id)
 
-
-# --- 클라이언트 이벤트 핸들러 ---
-
-@socketio.on("start_game")
-def on_start_game(data):
-    """방장이 게임 시작 버튼을 눌렀을 때"""
-    # 1. [수정] room_id 변수 정의 (여기서 에러가 났었습니다)
-    room_id = data.get("roomId")
-    
-    if not room_id:
-        return
+    # 4. 게임 종료 여부 확인
+    alive_players = get_alive_players(gs)
+    if len(alive_players) <= 1:
+        print(f"🏆 게임 종료! (시간 초과로 인한 종료)")
+        if len(alive_players) == 1:
+            survivor = alive_players[0]
+            survivor.final_rank = 1
         
-    gs = get_room(room_id)
-    # request를 사용하기 위해 상단에 from flask import request 확인 필요
-    player = find_player_by_sid(gs, request.sid)
-
-    if not player:
-        return
+        handle_winnings(room_id)
         
-    # 방장 권한 확인 (id가 0번인 플레이어)
-    if player.id != 0:
-        emit("error_message", {"message": "방장만 게임을 시작할 수 있습니다."})
-        return
-        
-    # 최소 인원 확인
-    if len(gs.players) < 2:
-        emit("error_message", {"message": "최소 2명 이상이어야 시작할 수 있습니다."})
-        return
-    
-    # 2. 백그라운드에서 게임 시작 흐름 실행
-    # (이제 room_id가 정의되었으므로 에러가 나지 않습니다)
-    socketio.start_background_task(start_game_flow, room_id)
-
-
-# ▼▼▼ [핸들러 복구] ▼▼▼
-@socketio.on("draw_tile")
-def on_draw_tile(data):
-    """(복구) 플레이어가 타일 색상을 선택"""
-    room_id = data.get("roomId")
-    color: Color = data.get("color", "black")
-    if not room_id: return
-    
-    gs = get_room(room_id)
-    player = find_player_by_sid(gs, request.sid)
-    
-    # 턴/페이즈 검증
-    if not player or gs.players[gs.current_turn].sid != player.sid:
-        return emit("error_message", {"message": "당신 턴이 아닙니다."})
-    if gs.turn_phase != "DRAWING":
-        return emit("error_message", {"message": "지금은 타일을 뽑을 수 없습니다."})
-        
-    # 1. 타이머 취소
-    if gs.turn_timer: gs.turn_timer.cancel()
-
-    # 2. 타일 뽑기
-    t = start_turn_from(gs, player, color)
-    if not t:
-        return emit("error_message", {"message": "더 이상 뽑을 타일이 없습니다."})
-
-        
-    # 3. 다음 페이즈 결정 (요청대로 즉시 다음 단계로)
-    if t.is_joker:
-        # 조커 -> 배치 단계
-        set_turn_phase(room_id, "PLACE_JOKER")
-        broadcast_in_game_state(room_id)
-    else:
-        # 일반 타일 -> 자동 배치 후 추리 단계
-        auto_place_drawn_tile(gs, player)
-        set_turn_phase(room_id, "GUESSING")
-        broadcast_in_game_state(room_id)
-# ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
-
-
-@socketio.on("place_joker")
-def on_place_joker(data):
-    """(복구) 플레이어가 조커 위치를 선택하여 배치"""
-    room_id = data.get("roomId")
-    index = data.get("index")
-    
-    # 1. 데이터 유효성 검사
-    if not room_id or index is None: 
-        return
-        
-    gs = get_room(room_id)
-    # request.sid를 사용하므로 상단에 from flask import request 필요
-    player = find_player_by_sid(gs, request.sid)
-    
-    # 2. 턴 및 페이즈 검증
-    # 내 턴인지 확인 (현재 턴 플레이어의 sid와 요청자의 sid 비교)
-    current_turn_player = gs.players[gs.current_turn % len(gs.players)]
-    if not player or current_turn_player.sid != player.sid:
-        emit("error_message", {"message": "당신 턴이 아닙니다."}, to=request.sid)
-        return
-        
-    # 조커 배치 단계인지, 그리고 배치할 타일(drawn_tile)이 실제로 있는지 확인
-    if gs.turn_phase != "PLACE_JOKER" or not gs.drawn_tile:
-        emit("error_message", {"message": "지금은 조커를 놓을 수 없습니다."}, to=request.sid)
+        winner = next((p for p in gs.players if p.final_rank == 1), None)
+        print(f"🏆 Sending game_over for {room_id}. Winner: {winner.nickname if winner else 'Unknown'}")
+        socketio.emit("game_over", {
+            "winner": {"name": winner.nickname if winner else "Unknown"}
+        }, room=room_id)
         return
 
-    # 3. 타이머 중지 (행동을 완료했으므로)
-    if gs.turn_timer: 
-        gs.turn_timer.cancel()
-        gs.turn_timer = None
-        
-    # 4. 조커 배치 로직 수행
-    t = gs.drawn_tile
-    
-    # 인덱스 범위 안전 장치 (0 ~ 현재 패의 길이 사이로 제한)
-    # 예: 패가 3장인데 index 100을 보내면 3(맨 뒤)으로 보정
-    insert_idx = max(0, min(int(index), len(player.hand)))
-    
-    player.hand.insert(insert_idx, t)
-    player.last_drawn_index = insert_idx # 방금 놓은 타일(조커) 위치 표시
-    
-    # 5. 임시 상태 초기화
-    gs.drawn_tile = None
-    gs.pending_placement = False
-    gs.can_place_anywhere = False # 조커 배치 완료했으므로 플래그 해제
-    
-    print(f"[{room_id}] {player.name}님이 조커를 인덱스 {insert_idx}에 배치함.")
-    
-    # 6. 다음 단계(추리)로 이동
-    set_turn_phase(room_id, "GUESSING")
-
-
-@socketio.on("guess_value")
-def on_guess_value(data):
-    """(수정) 추리 요청 처리 -> 애니메이션 페이즈 시작"""
-    room_id = data.get("roomId")
-    if not room_id: return
-    
-    gs = get_room(room_id)
-    player = find_player_by_sid(gs, request.sid)
-    
-    if not player or gs.players[gs.current_turn].sid != player.sid:
-        return emit("error_message", {"message": "당신 턴이 아닙니다."})
-    if gs.turn_phase not in ["GUESSING", "POST_SUCCESS_GUESS"]:
-        return emit("error_message", {"message": "지금은 추리할 수 없습니다."})
-
-    if gs.turn_timer: gs.turn_timer.cancel()
-    gs.turn_timer = None
-
-    target_id = data.get("targetId")
-    index = data.get("index")
-    value = data.get("value")
-
-    # 1. 추리 로직 실행 (상태 변경됨: tile.revealed = True 등)
-    result = guess_tile(gs, player, target_id, index, value)
-
-    # 2. 애니메이션 페이즈로 설정 (상태 브로드캐스트 생략 -> 애니메이션 종료 후 전송)
-    set_turn_phase(room_id, "ANIMATING_GUESS", broadcast=False)
-    
-    # 3. 애니메이션 시작 이벤트 전송 (결과 포함)
-    # 실제 타일 정보는 정답일 경우 target의 타일, 오답일 경우 guesser의 페널티 타일
-    revealed_tile_data = None
-    if result["correct"]:
-        t = result.get("actual_tile")
-        if t: revealed_tile_data = t.to_dict()
-    else:
-        t = result.get("penalty_tile")
-        if t: revealed_tile_data = t.to_dict()
-
-    socketio.emit("game:start_guess_animation", {
-        "guesser_id": player.id,
-        "target_id": target_id,
-        "index": index,
-        "value": value,
-        "correct": result["correct"],
-        "revealed_tile": revealed_tile_data # 애니메이션 오버레이에서 보여줄 타일 정보 (dict)
-    }, room=room_id)
-
-    # 중요: 여기서 broadcast_in_game_state를 호출하지 않음! 
-    # (애니메이션이 끝난 후 on_animation_done에서 호출)
-    
-    # 4. 결과 처리를 위해 임시 저장 (선택 사항, 혹은 on_animation_done에서 판단)
-    # 여기서는 간단히 on_animation_done에서 correct 여부를 클라이언트가 보내주는 것을 검증하거나
-    # 서버가 기억하는 방식을 쓸 수 있음. 
-    # 보안을 위해 서버 세션/상태에 저장하는 것이 좋으나, 
-    # 일단 간단히 클라이언트가 보내는 correct 값을 믿되, 
-    # 실제 게임 로직(guess_tile)은 이미 실행되었으므로 상태는 일관성 있음.
-
-
-@socketio.on("stop_guessing")
-def on_stop_guessing(data):
-    """(복구) 추리 성공 후 '턴 넘기기'를 선택"""
-    room_id = data.get("roomId")
-    if not room_id: return
-    
-    gs = get_room(room_id)
-    player = find_player_by_sid(gs, request.sid)
-
-    if not player or gs.players[gs.current_turn].sid != player.sid: return
-    if gs.turn_phase != "POST_SUCCESS_GUESS": return
-
-    if gs.turn_timer: gs.turn_timer.cancel()
-    
-    print(f"{player.name} 님이 추리를 중단하고 턴을 넘깁니다.")
-    
+    # 5. 게임이 안 끝났다면 다음 턴으로
     start_next_turn(room_id)
 
+
+# ... (이벤트 핸들러들 생략) ...
 
 def handle_winnings(room_id: str):
     """(수정) 게임 종료 후 랭킹과 개인 베팅 금액에 따라 화폐를 계산하고 정산"""
@@ -408,29 +271,49 @@ def handle_winnings(room_id: str):
         winner.final_rank = 1 
 
     payout_results = []
-    # 랭킹별 순위를 명확히 하기 위해 정렬 (만약 랭킹 부여 로직이 있다면)
-    # 현재는 final_rank가 1~4로 부여되었다고 가정합니다.
-
+    
     # 2. 계산
+    # 2. 계산 (모든 플레이어 순회)
     for player in gs.players:
         bet = player.bet_amount
         net_change = 0
         rank = player.final_rank
-
-        if rank == 1:
-            net_change = +bet # 1등은 베팅 금액만큼 획득
-        elif rank == 2:
-            net_change = +bet # 2등은 베팅 금액만큼 획득 (요청 사항)
-        elif rank == 3 or rank == 4:
-            net_change = -bet # 3, 4등은 베팅 금액만큼 차감
-        else:
-            # 게임이 중간에 취소되거나 순위가 미정인 경우 (0)
-            net_change = 0 
         
-        # 3. Player.money 업데이트
-        player.money += net_change
+        # 이미 정산된 플레이어(중도 퇴장 등)도 결과 리스트에는 포함해야 함
+        if player.settled:
+            # 이미 정산되었으므로 money 업데이트는 건너뛰고 결과만 추가
+            # net_change는 역산하거나 0으로 표시 (여기서는 0으로 표시하되, 최종 금액은 반영됨)
+            # 정확한 net_change를 알기 위해선 별도 저장이 필요하지만, 
+            # 일단 현재 로직상 1등 아니면 -bet 이었을 것임.
+            if rank == 1:
+                net_change = +(bet * 3)
+            else:
+                net_change = -bet
+        else:
+            # 정산 안 된 플레이어 (끝까지 남은 사람들)
+            if rank == 1:
+                net_change = +(bet * 3) # 🔥 1등은 베팅 금액의 3배 획득
+            else:
+                net_change = -bet # 🔥 나머지는 베팅 금액 차감 (패배)
+            
+            # 3. Player.money 업데이트
+            player.money += net_change
+            player.settled = True # 정산 완료 표시
 
-        # 4. 프론트엔드/DB 업데이트를 위한 결과 저장
+            # 🔥 [NEW] Firestore 업데이트
+            if FIREBASE_AVAILABLE:
+                try:
+                    db = get_db()
+                    if db:
+                        user_ref = db.collection('users').document(player.uid)
+                        user_ref.update({
+                            'money': admin_firestore.Increment(net_change)
+                        })
+                        print(f"💰 Firestore updated: {player.nickname} {net_change:+d} → {player.money}")
+                except Exception as e:
+                    print(f"❌ Firestore error for {player.uid}: {e}")
+
+        # 4. 프론트엔드/DB 업데이트를 위한 결과 저장 (모든 플레이어 포함)
         payout_results.append({
             "uid": player.uid,
             "nickname": player.nickname,
@@ -441,10 +324,144 @@ def handle_winnings(room_id: str):
         })
 
     # 5. 모든 클라이언트에게 정산 결과 브로드캐스트
-    socketio.emit("game:payout_result", payout_results, room=room_id)
+    if payout_results:
+        print(f"💸 Payout Results for {room_id}: {payout_results}")
+        socketio.emit("game:payout_result", payout_results, room=room_id)
+    else:
+        print(f"⚠️ No payout results for {room_id} (maybe already settled?)")
     
     print(f"[{room_id}] 게임 정산 완료. 순위별 정산 처리됨.")
 
+    # 🔥 [추가] 방 삭제 (리소스 정리)
+    # 클라이언트가 결과를 볼 시간을 주기 위해 타이머로 삭제하거나,
+    # 여기서는 즉시 삭제하되 메모리에서만 지우고 소켓 룸은 유지될 수 있음.
+    # 안전하게 10초 후 삭제하도록 설정
+    def delete_room():
+        if room_id in rooms:
+            del rooms[room_id]
+            print(f"🗑️ 방 삭제 완료: {room_id}")
+    
+    Timer(10.0, delete_room).start()
+
+@socketio.on("draw_tile")
+def on_draw_tile(data):
+    """플레이어가 덱에서 카드를 뽑을 때"""
+    room_id = data.get("roomId")
+    color = data.get("color")  # "black" or "white"
+    
+    gs = get_room(room_id)
+    player = find_player_by_sid(gs, request.sid)
+    
+    if not gs or not player:
+        return
+    
+    if gs.turn_phase != "DRAWING":
+        return
+    
+    if gs.players[gs.current_turn].sid != player.sid:
+        return
+    
+    # 타일 뽑기 로직 실행
+    tile = start_turn_from(gs, player, color)
+    
+    if not tile:
+        return
+    
+    # 조커인 경우 배치 페이즈로, 아니면 자동 배치
+    if tile.is_joker:
+        set_turn_phase(room_id, "PLACE_JOKER")
+    else:
+        auto_place_drawn_tile(gs, player)
+        set_turn_phase(room_id, "GUESSING")
+
+@socketio.on("place_joker")
+def on_place_joker(data):
+    """플레이어가 조커를 배치할 위치를 선택했을 때"""
+    room_id = data.get("roomId")
+    index = data.get("index")
+    
+    gs = get_room(room_id)
+    player = find_player_by_sid(gs, request.sid)
+    
+    if not gs or not player:
+        return
+    
+    if gs.turn_phase != "PLACE_JOKER":
+        return
+    
+    if gs.players[gs.current_turn].sid != player.sid:
+        return
+    
+    # 조커 배치
+    if gs.drawn_tile and gs.drawn_tile.is_joker:
+        player.hand.insert(index, gs.drawn_tile)
+        player.last_drawn_index = index
+        gs.drawn_tile = None
+        gs.pending_placement = False
+        gs.can_place_anywhere = False
+        
+        # 추리 페이즈로 전환
+        set_turn_phase(room_id, "GUESSING")
+
+@socketio.on("guess_value")
+def on_guess_value(data):
+    """플레이어가 추리를 시도할 때"""
+    room_id = data.get("roomId")
+    target_id = data.get("targetId")
+    index = data.get("index")
+    value = data.get("value")
+    
+    gs = get_room(room_id)
+    guesser = find_player_by_sid(gs, request.sid)
+    
+    if not gs or not guesser:
+        return
+    
+    if gs.turn_phase not in ["GUESSING", "POST_SUCCESS_GUESS"]:
+        return
+    
+    if gs.players[gs.current_turn].sid != guesser.sid:
+        return
+    
+    # 추리 로직 실행
+    result = guess_tile(gs, guesser, target_id, index, value)
+    
+    if not result.get("ok"):
+        return
+    
+    # 애니메이션 페이즈로 전환
+    set_turn_phase(room_id, "ANIMATING_GUESS", broadcast=False)
+    
+    # 🔥 [FIXED] 추리 시작 이벤트 브로드캐스트 (애니메이션 트리거)
+    # 프론트엔드는 "game:start_guess_animation"을 listen하고 있음
+    socketio.emit("game:start_guess_animation", {
+        "guesser_id": guesser.uid,
+        "target_id": target_id,
+        "index": index,
+        "value": value,
+        "correct": result.get("correct")
+    }, room=room_id)
+
+@socketio.on("stop_guessing")
+def on_stop_guessing(data):
+    """플레이어가 연속 추리를 멈추고 턴을 넘길 때 호출됨"""
+    room_id = data.get("roomId")
+    gs = get_room(room_id)
+    if not gs:
+        return
+    
+    player = find_player_by_sid(gs, request.sid)
+    if not player:
+        return
+    
+    # 현재 턴인지 확인
+    if gs.players[gs.current_turn].sid != player.sid:
+        return
+    
+    print(f"[{room_id}] {player.nickname} 턴 패스")
+    
+    # 다음 턴으로 넘김
+    start_next_turn(room_id)
 @socketio.on("game:animation_done")
 def on_animation_done(data):
     """클라이언트가 추리 결과 애니메이션을 완료했을 때 호출됨"""
@@ -467,16 +484,96 @@ def on_animation_done(data):
 
     print(f"[{room_id}] {player.nickname} 애니메이션 완료. 결과: {correct}")
 
-    # 1. 이제서야 변경된 상태(타일 공개 등)를 모두에게 알림
+    # 1. 탈락자 처리 및 순위 산정
+    alive_players = get_alive_players(gs)
+    alive_count = len(alive_players)
+    
+    # 방금 탈락한 플레이어 찾기 (final_rank가 0인데 eliminated 상태인 경우)
+    for p in gs.players:
+        if p.final_rank == 0 and is_player_eliminated(p):
+            # 탈락 확정!
+            # 순위 부여: (현재 생존자 수 + 1) -> 왜냐하면 방금 탈락했으므로
+            # 예: 4명 시작 -> 1명 탈락 -> 생존 3명 -> 탈락자는 4등
+            # 예: 3명 생존 -> 1명 탈락 -> 생존 2명 -> 탈락자는 3등
+            # 주의: alive_players에는 이미 p가 제외되어 있음.
+            p.final_rank = alive_count + 1
+            
+            print(f"💀 플레이어 탈락: {p.nickname} (Rank: {p.final_rank})")
+            socketio.emit("game:player_eliminated", {
+                "uid": p.uid,
+                "nickname": p.nickname,
+                "rank": p.final_rank
+            }, room=room_id)
+
+            # 🔥 [NEW] 즉시 패배 정산 (돈 차감)
+            if not p.settled:
+                net_change = -p.bet_amount
+                p.money += net_change
+                p.settled = True
+                
+                print(f"💰 [Settlement] Player {p.nickname} eliminated. Bet: {p.bet_amount}, Net: {net_change}") # 🔥 [LOG]
+
+                # Firestore 업데이트 (패배 패널티)
+                if FIREBASE_AVAILABLE:
+                    try:
+                        db = get_db()
+                        if db:
+                            user_ref = db.collection('users').document(p.uid)
+                            user_ref.update({
+                                'money': admin_firestore.Increment(net_change)
+                            })
+                            print(f"💰 Firestore updated (eliminated): {p.nickname} {net_change:+d}")
+                    except Exception as e:
+                        print(f"❌ Firestore error: {e}")
+                
+                # 정산 결과 전송 -> GameOverModal 띄우기 위함
+                socketio.emit("game:payout_result", [{
+                    "uid": p.uid,
+                    "nickname": p.nickname,
+                    "rank": p.final_rank,
+                    "bet": p.bet_amount,
+                    "net_change": net_change,
+                    "new_total": p.money
+                }], room=room_id)
+
+    # 2. 게임 종료 조건 확인 (생존자가 1명 이하일 때)
+    # (2명 이상 게임이므로 1명이 남으면 종료)
+    if alive_count <= 1:
+        print(f"🏆 게임 종료! 생존자 수: {alive_count}")
+        
+        # 마지막 생존자에게 1등 부여
+        if alive_count == 1:
+            survivor = alive_players[0]
+            survivor.final_rank = 1
+        
+        # 정산 및 종료 처리
+        handle_winnings(room_id)
+        
+        # 게임 종료 이벤트 전송 (handle_winnings에서 payout_result를 보내지만, 명시적 game_over도 보냄)
+        winner = next((p for p in gs.players if p.final_rank == 1), None)
+        print(f"🏆 Sending game_over for {room_id}. Winner: {winner.nickname if winner else 'Unknown'}")
+        socketio.emit("game_over", {
+            "winner": {"name": winner.nickname if winner else "Unknown"}
+        }, room=room_id)
+        
+        # 방 정리 (약간의 딜레이 후)
+        # socketio.sleep(10) 
+        # del rooms[room_id] # 바로 삭제하면 클라이언트가 결과를 못 봄. 나중에 처리하거나 클라이언트가 나가도록 유도.
+        return
+
+    # 3. 상태 업데이트 전송
     broadcast_in_game_state(room_id)
 
-    # 2. 결과에 따른 분기
+    # 4. 결과에 따른 턴 진행 분기
     if correct:
-        # 정답 -> 연속 추리 기회
-        set_turn_phase(room_id, "POST_SUCCESS_GUESS")
-        socketio.emit("game:prompt_continue", 
-                      {"timer": TURN_TIMER_SECONDS}, 
-                      to=player.sid)
+        # 정답 -> 연속 추리 기회 (단, 내가 탈락했으면 턴 넘김 - 희박하지만 자폭룰이 있다면)
+        if is_player_eliminated(player):
+             start_next_turn(room_id)
+        else:
+            set_turn_phase(room_id, "POST_SUCCESS_GUESS")
+            socketio.emit("game:prompt_continue", 
+                          {"timer": TURN_TIMER_SECONDS}, 
+                          to=player.sid)
     else:
         # 오답 -> 턴 종료 및 다음 사람
         start_next_turn(room_id)
@@ -492,3 +589,86 @@ def on_request_game_state(data):
     broadcast_in_game_state(room_id)
     
     print(f"[{room_id}] 클라이언트의 요청으로 게임 상태 동기화 전송")
+
+
+@socketio.on("leave_game")
+def on_leave_game(data):
+    """(신규) 플레이어가 게임 도중 나갔을 때 처리"""
+    room_id = data.get("roomId")
+    if not room_id: return
+
+    gs = get_room(room_id)
+    player = find_player_by_sid(gs, request.sid)
+    if not gs or not player: return
+
+    print(f"🚪 플레이어 퇴장: {player.nickname} ({player.uid})")
+
+    # 1. 모든 카드 공개 처리
+    for tile in player.hand:
+        tile.revealed = True
+    
+    # 2. 탈락 처리 및 순위 산정
+    if player.final_rank == 0:
+        alive_players = get_alive_players(gs)
+        alive_count = len(alive_players)
+        player.final_rank = alive_count + 1
+        
+        socketio.emit("game:player_eliminated", {
+            "uid": player.uid,
+            "nickname": player.nickname,
+            "rank": player.final_rank
+        }, room=room_id)
+
+        # 🔥 [추가] 즉시 패배 정산 (돈 차감)
+        if not player.settled:
+            net_change = -player.bet_amount
+            player.money += net_change
+            player.settled = True
+            
+            # 🔥 [NEW] Firestore 업데이트 (중도 퇴장 패널티)
+            if FIREBASE_AVAILABLE:
+                try:
+                    db = get_db()
+                    if db:
+                        user_ref = db.collection('users').document(player.uid)
+                        user_ref.update({
+                            'money': admin_firestore.Increment(net_change)
+                        })
+                        print(f"💰 Firestore updated (leave): {player.nickname} {net_change:+d}")
+                except Exception as e:
+                    print(f"❌ Firestore error: {e}")
+            
+            # 나에게만(혹은 모두에게) 정산 결과 전송 -> GameOverModal 띄우기 위함
+            socketio.emit("game:payout_result", [{
+                "uid": player.uid,
+                "nickname": player.nickname,
+                "rank": player.final_rank,
+                "bet": player.bet_amount,
+                "net_change": net_change,
+                "new_total": player.money
+            }], room=room_id)
+
+    # 3. 턴 넘기기 (만약 내 턴이었다면)
+    if gs.players[gs.current_turn].sid == player.sid:
+        print("내 턴에 나갔으므로 턴을 넘깁니다.")
+        if gs.turn_timer: gs.turn_timer.cancel()
+        start_next_turn(room_id)
+    else:
+        # 내 턴이 아니더라도 상태 업데이트는 필요 (카드 공개됨)
+        broadcast_in_game_state(room_id)
+
+    # 4. 게임 종료 조건 확인 (남은 사람이 1명 이하)
+    alive_players = get_alive_players(gs)
+    if len(alive_players) <= 1:
+        print(f"🏆 게임 종료! (퇴장으로 인한 종료)")
+        if len(alive_players) == 1:
+            survivor = alive_players[0]
+            survivor.final_rank = 1
+        
+        handle_winnings(room_id)
+        
+        winner = next((p for p in gs.players if p.final_rank == 1), None)
+        print(f"🏆 Sending game_over for {room_id}. Winner: {winner.nickname if winner else 'Unknown'}")
+        socketio.emit("game_over", {
+            "winner": {"name": winner.nickname if winner else "Unknown"}
+        }, room=room_id)

@@ -33,21 +33,36 @@ def on_join_queue(data):
     uid = data.get("uid")
     name = data.get("name") or f"Player_{sid[:4]}"
     
-    nickname = data.get("nickname", name) 
+    # 🔥 [FIXED] nickname이 없거나 빈 문자열이면 name을 사용하지 않고 실제 사용자 정보에서 가져와야 함
+    nickname = data.get("nickname") or name  # nickname이 없으면 name 사용
     email = data.get("email", "N/A")
     major = data.get("major", "N/A")
-    money = data.get("money", 0)  # 👈 money 추출
-    year = data.get("year", 0)
+    try:
+        money = int(data.get("money", 0))
+    except:
+        money = 0
+    try:
+        year = int(data.get("year", 0))
+    except:
+        year = 0
     if not uid:
-        emit("error_message", {"message": "UID가 필요합니다."})
         return
 
 
-    if any(p["uid"] == uid for p in queue): # sid가 아닌 uid로 중복 체크
-        print(f"이미 대기열에 있음: {name}")
+    # ▼▼▼ [수정] 이미 대기열에 있는 경우 SID 업데이트 ▼▼▼
+    existing_player_index = next((i for i, p in enumerate(queue) if p["uid"] == uid), -1)
+    if existing_player_index != -1:
+        print(f"🔄 대기열 재접속: {nickname} (기존 SID: {queue[existing_player_index]['sid']} -> 신규 SID: {sid})")
+        queue[existing_player_index]["sid"] = sid
+        # 필요한 경우 다른 정보도 업데이트 (예: 돈, 닉네임 등 변경되었을 수 있음)
+        queue[existing_player_index]["money"] = money
+        queue[existing_player_index]["bet_amount"] = bet_amount
+        
+        broadcast_queue_status()
         return
+    # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
     
-    print(f"-> 큐 참가: {name} ({sid})")
+    print(f"-> 큐 참가: {nickname} ({sid})")  # 🔥 name -> nickname
     queue.append({
         # ▼▼▼ [수정됨] sid와 uid를 명시적으로 저장 ▼▼▼
         "sid": sid,             # 👈 [필수] 이 키를 추가합니다.
@@ -194,7 +209,6 @@ def on_create_room(data):
     year = data.get("year", 0)
 
     if not uid:
-        emit("error_message", {"message": "UID가 필요합니다."})
         return
 
     room_id = str(uuid.uuid4())[:6]
@@ -232,19 +246,27 @@ def on_create_room(data):
 
 @socketio.on("enter_room")
 def on_enter_room(data):
-    """(수정) 플레이어가 방에 입장 (로직 정리)"""
+    """(수정) 플레이어가 방에 입장할 때"""
+    print(f"📥 [DEBUG] enter_room received: {data}")
+    
     room_id = data.get("roomId")
     uid = data.get("uid")
     
     # ▼▼▼ [추가된 필드 추출] ▼▼▼
     name = data.get("name") or f"Player_{request.sid[:4]}"
+    nickname = data.get("nickname", name) or f"Player_{request.sid[:4]}"
     nickname = data.get("nickname", name)
     email = data.get("email", "N/A")
     major = data.get("major", "N/A")
-    money = data.get("money", 0)  # 👈 money 추출
-    year = data.get("year", 0)
+    try:
+        money = int(data.get("money", 0))
+    except:
+        money = 0
+    try:
+        year = int(data.get("year", 0))
+    except:
+        year = 0
     if not room_id or not uid or room_id not in rooms:
-        emit("error_message", {"message": "존재하지 않는 방입니다."})
         return
 
     gs = get_room(room_id)
@@ -271,10 +293,8 @@ def on_enter_room(data):
     # ② 신규 입장
     # --------------------------
     if len(gs.players) >= 4:
-        emit("error_message", {"message": "방이 꽉 찼습니다."})
         return
     if game_started:
-        emit("error_message", {"message": "이미 시작된 게임입니다."})
         return
 
     new_player = Player(
@@ -289,7 +309,7 @@ def on_enter_room(data):
         year=year,
         hand=[],
         last_drawn_index=None,
-        bet_amount=0,  # 👈 커스텀 방이므로 베팅 금액은 0
+        bet_amount=0,  # 🔥 커스텀 방은 배팅 없음 (0원)
     )
     gs.players.append(new_player)
     join_room(room_id, sid=request.sid)
@@ -382,3 +402,24 @@ def on_leave_room(data):
             print(f"[{room_id}] (로비) 모든 플레이어가 나가서 방 삭제")
             if room_id in rooms: 
                 del rooms[room_id]
+
+
+@socketio.on("start_game")
+def on_start_game(data):
+    """(수정) 커스텀 방 게임 시작"""
+    room_id = data.get("roomId")
+    if not room_id or room_id not in rooms:
+        return
+
+    gs = rooms[room_id]
+    
+    # 방장인지 확인 (id=0)
+    player = find_player_by_sid(gs, request.sid)
+    if not player or player.id != 0:
+        return
+
+    if len(gs.players) < 2:
+        return
+
+    print(f"🎮 게임 시작 요청: {player.name} (Room {room_id})")
+    socketio.start_background_task(start_game_flow, room_id)
