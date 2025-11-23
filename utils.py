@@ -37,16 +37,18 @@ def serialize_tile(t: Tile, is_self: bool = False) -> Dict[str, Any]:
 # ▼▼▼ (핵심 수정 2) ▼▼▼
 # 'is_self' 플래그를 받아서 serialize_tile로 넘깁니다.
 def serialize_player(p: Player, is_self: bool = False) -> Dict[str, Any]:
+    # print(f"🔍 Serializing {p.nickname}: Bet={p.bet_amount}, Rank={p.final_rank}") # Debug log
     return {
         "sid": p.sid,
         "uid": p.uid,
         "id": p.id,
         "name": p.name,
-        "nickname": p.nickname, # 🔥 [추가]
-        "major": p.major,       # 🔥 [추가]
-        "year": p.year,         # 🔥 [추가]
-        "money": p.money,       # 🔥 [추가]
-        "betAmount": p.bet_amount, # 🔥 [추가] 베팅 금액
+        "nickname": p.nickname,
+        "major": p.major,
+        "year": p.year,
+        "money": p.money,
+        "betAmount": p.bet_amount,
+        "rank": p.final_rank, # 🔥 [NEW] 순위 정보 전송
         "hand": [serialize_tile(t, is_self) for t in p.hand],
         "lastDrawnIndex": p.last_drawn_index,
     }

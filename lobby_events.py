@@ -27,7 +27,7 @@ def broadcast_queue_status():
 def on_join_queue(data):
     global queue
     sid = request.sid
-    bet_amount = data.get("betAmount", 10000) # 🔥 [FIX] 기본값 10000으로 변경 (테스트용)
+    bet_amount = int(data.get("betAmount", 10000)) # 🔥 [FIX] Ensure int
     
     # ▼▼▼ [추가된 필드 추출] ▼▼▼
     uid = data.get("uid")
@@ -278,6 +278,16 @@ def on_enter_room(data):
     # ① 재접속 처리
     # --------------------------
     if existing_player:
+        # 🔥 [FIX] 같은 SID로 다시 들어오는 경우 (SPA 페이지 이동 등)는 패배 처리 하지 않음
+        if existing_player.sid == request.sid:
+             print(f"🔄 [SPA Navigation] {nickname} re-entered room {room_id} with same SID. Ignoring.")
+             # 상태만 다시 전송
+             if game_started:
+                 broadcast_in_game_state(room_id)
+             else:
+                 socketio.emit("room_state", serialize_state_for_lobby(gs), room=room_id)
+             return
+
         print(f"🔄 Reconnected: {nickname} to room {room_id} (GameStarted: {game_started})")
         
         # 🔥 [FIX] 사용자가 "새로고침 = 패배"를 원함.

@@ -27,24 +27,26 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
     queue = [p for p in queue if p["sid"] != request.sid]
 
 
-    queue = [p for p in queue if p["sid"] != sid]
-    
     if len(queue) < original_len:
-        print(f"👋 연결 끊김: 대기열에서 {sid} 제거됨.")
-        broadcast_queue_status()
+        print(f"👋 연결 끊김: 대기열에서 {request.sid} 제거됨.")
+        # 🔥 [FIX] lobby_events에서 가져오거나 직접 구현
+        try:
+            from lobby_events import broadcast_queue_status
+            broadcast_queue_status()
+        except ImportError:
+            print("⚠️ broadcast_queue_status import failed")
 
     for room_id, gs in list(rooms.items()):
         player = find_player_by_sid(gs, request.sid)
         if player:
-            gs.players.remove(player) # 일단 목록에서 제거
-            print(f"👤 {player.name} left room {room_id}")
             
             # ▼▼▼▼▼ (핵심 수정) ▼▼▼▼▼
             # [요청사항] 연결 끊김(새로고침/창닫기) 시 즉시 탈락 및 정산 처리
             
             # 1. 게임 중이라면 패배 처리 및 정산
-            # 🔥 [FIX] 더미가 비어있어도 게임 중일 수 있음. gs.game_started 플래그 사용
-            game_started = gs.game_started or (gs.turn_phase != "INIT")
+            # 🔥 [FIX] 더미가 비어있어도 게임 중일 수 있음. gs.game_started 플래그 또는 패를 가지고 있는지 확인
+            has_cards = len(player.hand) > 0
+            game_started = gs.game_started or (gs.turn_phase != "INIT") or has_cards
 
             if game_started:
                 print(f"⚠️ {player.nickname} 님이 이탈하여 패배 처리되고 배팅 금액을 모두 잃습니다.")
@@ -52,11 +54,17 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
                 # (1) 모든 카드 공개
                 for tile in player.hand:
                     tile.revealed = True
+                print(f"🃏 [Disconnect] Revealed hand for {player.nickname}") # Debug
                 
                 # (2) 탈락 처리 및 순위 산정
                 if player.final_rank == 0:
                     from game_logic import get_alive_players
                     alive_players = get_alive_players(gs)
+                    # 남은 생존자 수 + 1 = 내 순위 (예: 2명 남았을 때 죽으면 3등)
+                    # 하지만 이미 alive_players에는 내가 포함되어 있을 수 있음 (아직 remove 안했으므로)
+                    # get_alive_players는 final_rank==0인 사람만 반환함.
+                    # 내가 아직 final_rank가 0이면 alive_players에 포함됨.
+                    
                     player.final_rank = len(alive_players) 
                     
                     socketio.emit("game:player_eliminated", {
@@ -82,19 +90,22 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
                                     user_ref.update({
                                         'money': admin_firestore.Increment(net_change)
                                     })
-                                    print(f"💰 Firestore updated (disconnect): {player.nickname} {net_change:+d}")
+                                    print(f"💀 {player.nickname} 님이 새로고침/연결 끊김으로 패배 처리됨. ({net_change:+d})")
                             except Exception as e:
                                 print(f"❌ Firestore error: {e}")
                         
-                        # 정산 결과 전송
-                        socketio.emit("game:payout_result", [{
+                        # 정산 결과 저장 및 전송
+                        payout_data = {
                             "uid": player.uid,
                             "nickname": player.nickname,
                             "rank": player.final_rank,
                             "bet": player.bet_amount,
                             "net_change": net_change,
                             "new_total": player.money
-                        }], room=room_id)
+                        }
+                        gs.payout_results.append(payout_data) # 🔥 [FIX] 정산 결과 저장 (재접속 시 전송용)
+                        
+                        socketio.emit("game:payout_result", [payout_data], room=room_id)
 
                 # (4) 턴 넘기기 (내 턴이었다면)
                 if gs.players and gs.current_turn < len(gs.players):
@@ -109,6 +120,9 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
                 # (5) 게임 종료 조건 확인
                 from game_logic import get_alive_players
                 alive_players = get_alive_players(gs)
+                
+                # 나를 제외한 생존자가 1명 이하면 게임 종료
+                # (내가 이미 final_rank가 설정되었으므로 get_alive_players에는 포함되지 않음)
                 
                 if len(alive_players) <= 1:
                     print(f"🏆 게임 종료! (이탈로 인한 종료)")
@@ -125,6 +139,7 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
                     }, room=room_id)
 
             # 2. 플레이어 제거 (게임 중이 아닐 때만!)
+            print(f"🔍 [Disconnect] game_started={game_started}, phase={gs.turn_phase}") # Debug
             if not game_started:
                 if player in gs.players:
                     gs.players.remove(player)

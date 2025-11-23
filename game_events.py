@@ -225,19 +225,27 @@ def handle_timeout(room_id: str, player_uid: str, expected_phase: TurnPhase):
                 except Exception as e:
                     print(f"❌ Firestore error: {e}")
             
-            socketio.emit("game:payout_result", [{
+            # 정산 결과 저장 및 전송
+            payout_data = {
                 "uid": player.uid,
                 "nickname": player.nickname,
                 "rank": player.final_rank,
                 "bet": player.bet_amount,
                 "net_change": net_change,
                 "new_total": player.money
-            }], room=room_id)
+            }
+            gs.payout_results.append(payout_data)  # 🔥 [FIX] 정산 결과 저장
+            
+            socketio.emit("game:payout_result", [payout_data], room=room_id)
 
     # 3. 상태 업데이트 (카드 공개됨)
     broadcast_in_game_state(room_id)
 
-    # 4. 게임 종료 여부 확인
+    # 4. 턴 넘기기 (타임아웃된 플레이어의 턴이므로 항상 넘김)
+    if gs.turn_timer: 
+        gs.turn_timer.cancel()
+    
+    # 5. 게임 종료 여부 확인 (턴 넘기기 전에 확인)
     alive_players = get_alive_players(gs)
     if len(alive_players) <= 1:
         print(f"🏆 게임 종료! (시간 초과로 인한 종료)")
@@ -245,6 +253,7 @@ def handle_timeout(room_id: str, player_uid: str, expected_phase: TurnPhase):
             survivor = alive_players[0]
             survivor.final_rank = 1
         
+        print(f"🏆 [Timeout] Game ending. Calling handle_winnings for {room_id}")
         handle_winnings(room_id)
         
         winner = next((p for p in gs.players if p.final_rank == 1), None)
@@ -254,7 +263,7 @@ def handle_timeout(room_id: str, player_uid: str, expected_phase: TurnPhase):
         }, room=room_id)
         return
 
-    # 5. 게임이 안 끝났다면 다음 턴으로
+    # 6. 게임이 안 끝났다면 다음 턴으로
     start_next_turn(room_id)
 
 
@@ -262,6 +271,7 @@ def handle_timeout(room_id: str, player_uid: str, expected_phase: TurnPhase):
 
 def handle_winnings(room_id: str):
     """(수정) 게임 종료 후 랭킹과 개인 베팅 금액에 따라 화폐를 계산하고 정산"""
+    print(f"💰 [handle_winnings] Called for {room_id}")
     gs = get_room(room_id)
     if not gs: return
 
