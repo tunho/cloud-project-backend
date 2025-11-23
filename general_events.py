@@ -43,9 +43,11 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
             # [요청사항] 연결 끊김(새로고침/창닫기) 시 즉시 탈락 및 정산 처리
             
             # 1. 게임 중이라면 패배 처리 및 정산
-            game_started = bool(gs.piles["black"] or gs.piles["white"])
+            # 🔥 [FIX] 더미가 비어있어도 게임 중일 수 있음. gs.game_started 플래그 사용
+            game_started = gs.game_started or (gs.turn_phase != "INIT")
+
             if game_started:
-                print(f"👋 게임 중 이탈: {player.name} -> 즉시 탈락 및 정산")
+                print(f"⚠️ {player.nickname} 님이 이탈하여 패배 처리되고 배팅 금액을 모두 잃습니다.")
                 
                 # (1) 모든 카드 공개
                 for tile in player.hand:
@@ -55,11 +57,6 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
                 if player.final_rank == 0:
                     from game_logic import get_alive_players
                     alive_players = get_alive_players(gs)
-                    # 나 자신은 아직 리스트에 있으므로 포함됨. 
-                    # 하지만 '생존자 수' 기준으로 순위를 매겨야 함.
-                    # 내가 나가면 생존자는 (현재 생존자 - 1)명이 됨.
-                    # 내 순위는 (현재 생존자 수)가 됨.
-                    # 예: 4명 생존 -> 내가 나감 -> 3명 남음 -> 나는 4등
                     player.final_rank = len(alive_players) 
                     
                     socketio.emit("game:player_eliminated", {
@@ -111,9 +108,6 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
 
                 # (5) 게임 종료 조건 확인
                 from game_logic import get_alive_players
-                # 여기서 player는 아직 gs.players에 있음. 하지만 eliminated 상태이거나 곧 제거됨.
-                # get_alive_players는 final_rank==0인 사람만 셈.
-                # 방금 final_rank를 설정했으므로 나는 제외됨.
                 alive_players = get_alive_players(gs)
                 
                 if len(alive_players) <= 1:
@@ -130,12 +124,13 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
                         "winner": {"name": winner.nickname if winner else "Unknown"}
                     }, room=room_id)
 
-            # 2. 플레이어 제거
-            gs.players.remove(player)
-            print(f"🗑️ {player.name} removed from room {room_id}")
-
-            # 3. 방이 비었거나 로비 상태라면 정리
+            # 2. 플레이어 제거 (게임 중이 아닐 때만!)
             if not game_started:
+                if player in gs.players:
+                    gs.players.remove(player)
+                    print(f"🗑️ {player.name} removed from room {room_id}")
+
+                # 3. 방이 비었거나 로비 상태라면 정리
                 if gs.players:
                     # [로비] ID 재정렬
                     for i, p in enumerate(gs.players):
@@ -146,11 +141,7 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
                     if room_id in rooms:
                         del rooms[room_id]
             else:
-                # 게임 중이었는데 다 나갔으면 삭제
-                if not gs.players:
-                    print(f"🗑️ Room {room_id} is empty (game ended), deleting.")
-                    if room_id in rooms:
-                        del rooms[room_id]
+                print(f"🚫 게임 중이므로 {player.nickname}를 목록에서 제거하지 않음 (재접속/정산 보존)")
             
             break
             # ▲▲▲▲▲ (핵심 수정) ▲▲▲▲▲

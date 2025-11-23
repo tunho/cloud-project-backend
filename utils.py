@@ -130,6 +130,7 @@ def broadcast_in_game_state(room_id: str):
             "drawnTile": serialize_tile(gs.drawn_tile, is_self=is_current_turn_player),
             "phase": gs.turn_phase, # 🔥 [FIX] Refresh 시 페이즈 정보 전송
             "remainingTime": max(0, TURN_TIMER_SECONDS - (time.time() - gs.turn_start_time)) if gs.turn_start_time else 0, # 🔥 [NEW] 남은 시간 전송
+            "payoutResults": gs.payout_results, # 🔥 [NEW] 정산 결과 전송
         }
         
         # 'state_update' 이벤트로 개인화된 상태 전송

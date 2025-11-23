@@ -27,7 +27,7 @@ def broadcast_queue_status():
 def on_join_queue(data):
     global queue
     sid = request.sid
-    bet_amount = data.get("betAmount", 0) # 기본값 100으로 가정
+    bet_amount = data.get("betAmount", 10000) # 🔥 [FIX] 기본값 10000으로 변경 (테스트용)
     
     # ▼▼▼ [추가된 필드 추출] ▼▼▼
     uid = data.get("uid")
@@ -62,7 +62,7 @@ def on_join_queue(data):
         return
     # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
     
-    print(f"-> 큐 참가: {nickname} ({sid})")  # 🔥 name -> nickname
+    print(f"-> 큐 참가: {nickname} ({sid}) Bet: {bet_amount}")  # 🔥 name -> nickname
     queue.append({
         # ▼▼▼ [수정됨] sid와 uid를 명시적으로 저장 ▼▼▼
         "sid": sid,             # 👈 [필수] 이 키를 추가합니다.
@@ -278,7 +278,81 @@ def on_enter_room(data):
     # ① 재접속 처리
     # --------------------------
     if existing_player:
-        print(f"🔄 Reconnected: {name} to room {room_id}")
+        print(f"🔄 Reconnected: {nickname} to room {room_id} (GameStarted: {game_started})")
+        
+        # 🔥 [FIX] 사용자가 "새로고침 = 패배"를 원함.
+        # 게임 중인데 final_rank가 0(생존)이라면, 이는 비정상 종료 후 재접속이므로 '패배' 처리.
+        if game_started and existing_player.final_rank == 0:
+            print(f"💀 {existing_player.nickname} 재접속 -> 즉시 패배 처리 (Refresh Rule)")
+            
+            # (1) 카드 공개
+            for tile in existing_player.hand:
+                tile.revealed = True
+            
+            # (2) 탈락 처리
+            from game_logic import get_alive_players
+            alive_players = get_alive_players(gs)
+            existing_player.final_rank = len(alive_players)
+            
+            socketio.emit("game:player_eliminated", {
+                "uid": existing_player.uid,
+                "nickname": existing_player.nickname,
+                "rank": existing_player.final_rank
+            }, room=room_id)
+            
+            # (3) 정산
+            if not existing_player.settled:
+                net_change = -existing_player.bet_amount
+                existing_player.money += net_change
+                existing_player.settled = True
+                
+                # Firestore 업데이트
+                try:
+                    from firebase_admin_config import get_db
+                    from firebase_admin import firestore as admin_firestore
+                    db = get_db()
+                    if db:
+                        user_ref = db.collection('users').document(existing_player.uid)
+                        user_ref.update({'money': admin_firestore.Increment(net_change)})
+                        print(f"💰 Firestore updated (refresh-defeat): {existing_player.nickname} {net_change:+d}")
+                except Exception as e:
+                    print(f"❌ Firestore error: {e}")
+                
+                socketio.emit("game:payout_result", [{
+                    "uid": existing_player.uid,
+                    "nickname": existing_player.nickname,
+                    "rank": existing_player.final_rank,
+                    "bet": existing_player.bet_amount,
+                    "net_change": net_change,
+                    "new_total": existing_player.money
+                }], room=room_id)
+            
+            # (4) 턴 넘기기 (내 턴이었다면)
+            # 주의: SID 업데이트 전이므로 existing_player.sid는 구 SID임.
+            if gs.players and gs.current_turn < len(gs.players):
+                if gs.players[gs.current_turn].sid == existing_player.sid:
+                    print(f"[{room_id}] 턴 플레이어 재접속(패배) -> 턴 넘김")
+                    if gs.turn_timer: gs.turn_timer.cancel()
+                    from game_events import start_next_turn
+                    socketio.start_background_task(start_next_turn, room_id)
+                else:
+                    broadcast_in_game_state(room_id)
+            
+            # (5) 게임 종료 체크
+            alive_players = get_alive_players(gs)
+            if len(alive_players) <= 1:
+                print(f"🏆 게임 종료! (재접속 패배로 인한 종료)")
+                if len(alive_players) == 1:
+                    alive_players[0].final_rank = 1
+                
+                from game_events import handle_winnings
+                handle_winnings(room_id)
+                
+                winner = next((p for p in gs.players if p.final_rank == 1), None)
+                socketio.emit("game_over", {
+                    "winner": {"name": winner.nickname if winner else "Unknown"}
+                }, room=room_id)
+
         existing_player.sid = request.sid
         join_room(room_id, sid=request.sid)
         
@@ -309,12 +383,12 @@ def on_enter_room(data):
         year=year,
         hand=[],
         last_drawn_index=None,
-        bet_amount=0,  # 🔥 커스텀 방은 배팅 없음 (0원)
+        bet_amount=data.get("betAmount", 0),  # 🔥 [FIX] 커스텀 게임은 기본값 0 (큐 매칭은 check_queue_match에서 설정됨)
     )
     gs.players.append(new_player)
     join_room(room_id, sid=request.sid)
 
-    print(f"👤 {name} joined room {room_id} (현재 {len(gs.players)}명)")
+    print(f"👤 {name} joined room {room_id} (현재 {len(gs.players)}명) Bet: {new_player.bet_amount}")
     
     # (핵심) 방에 있는 모든 사람에게 로비 상태 갱신
     socketio.emit("room_state", serialize_state_for_lobby(gs), room=room_id)

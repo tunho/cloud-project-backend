@@ -102,7 +102,7 @@ def start_next_turn(room_id: str):
         print(f"[{room_id}] ❌ ERROR: 현재 플레이어를 찾을 수 없습니다.")
         return
 
-    print(f"--- 턴 시작 ({player.name}) ---")
+    print(f"--- {player.nickname} 님의 턴 시작 ---")
     
     # [수정] 턴 페이즈 결정
     piles_empty = not gs.piles["black"] and not gs.piles["white"]
@@ -136,7 +136,7 @@ def set_turn_phase(room_id: str, phase: TurnPhase, broadcast: bool = True):
         gs.pending_placement = False
         gs.can_place_anywhere = False
     
-    print(f"[{room_id}] {player.name} 님의 페이즈 변경 -> {phase}")
+    print(f"[{room_id}] {player.nickname} 페이즈 변경: {phase}")
 
     # 3. 클라이언트에 현재 턴 정보 전송 (페이즈 변경 알림은 항상 전송)
     emit_data = {
@@ -325,10 +325,11 @@ def handle_winnings(room_id: str):
 
     # 5. 모든 클라이언트에게 정산 결과 브로드캐스트
     if payout_results:
-        print(f"💸 Payout Results for {room_id}: {payout_results}")
+        gs.payout_results = payout_results # 🔥 [NEW] 결과 저장 (재접속 시 전송용)
+        print(f"💸 정산 결과 ({room_id}): {payout_results}")
         socketio.emit("game:payout_result", payout_results, room=room_id)
     else:
-        print(f"⚠️ No payout results for {room_id} (maybe already settled?)")
+        print(f"⚠️ 정산 결과 없음 ({room_id}) - 이미 처리됨?")
     
     print(f"[{room_id}] 게임 정산 완료. 순위별 정산 처리됨.")
 
@@ -481,6 +482,9 @@ def on_animation_done(data):
     if gs.turn_phase != "ANIMATING_GUESS":
         # 이미 처리되었거나 페이즈가 안 맞으면 무시
         return
+    
+    # 🔥 [FIX] Race Condition 방지: 즉시 페이즈를 변경하여 중복 실행 막음
+    gs.turn_phase = "PROCESSING"
 
     print(f"[{room_id}] {player.nickname} 애니메이션 완료. 결과: {correct}")
 

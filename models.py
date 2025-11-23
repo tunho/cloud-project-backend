@@ -49,7 +49,7 @@ class Player:
     money: int = 0  # 👈 money 필드 추가
     nickname: str = ""
     year: int = 0
-    bet_amount: int = 0
+    bet_amount: int = 10000 # 🔥 [FIX] 기본값 10000
     final_rank: int = 0
     settled: bool = False  # 👈 정산 완료 여부
     
@@ -69,4 +69,5 @@ class GameState:
     turn_timer: Optional[Timer] = None
     elimination_count: int = 0
     turn_start_time: float = 0.0 # 👈 턴 시작 시간 (서버 타임스탬프)
+    payout_results: List[Dict[str, Any]] = field(default_factory=list) # 🔥 [NEW] 정산 결과 저장 (재접속 시 복구용)
     
