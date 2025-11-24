@@ -136,6 +136,34 @@ def broadcast_in_game_state(room_id: str):
         }
         
         # 'state_update' 이벤트로 개인화된 상태 전송
-        socketio.emit("state_update", state_for_player, to=p_to_send.sid)
+        try:
+            socketio.emit("state_update", state_for_player, to=p_to_send.sid)
+        except Exception as e:
+            print(f"⚠️ Failed to send state to {p_to_send.nickname} ({p_to_send.sid}): {e}")
+            
+    print(f"📡 [Broadcast] Completed for room {room_id}") # Debug
 
 # (기존 broadcast_state 함수는 삭제하고 위 함수로 대체)
+
+# 🔥 [NEW] 비동기 Firestore 업데이트 함수
+def update_user_money_async(uid: str, amount: int, nickname: str = "Unknown"):
+    """
+    Firestore 업데이트를 별도 스레드에서 실행하여 메인 스레드(Socket.IO) 차단을 방지함.
+    """
+    def _update():
+        try:
+            from firebase_admin_config import get_db
+            from firebase_admin import firestore as admin_firestore
+            
+            db = get_db()
+            if db:
+                user_ref = db.collection('users').document(uid)
+                user_ref.update({
+                    'money': admin_firestore.Increment(amount)
+                })
+                print(f"💰 Firestore updated (async): {nickname} {amount:+d}")
+        except Exception as e:
+            print(f"❌ Firestore async update error for {nickname} ({uid}): {e}")
+
+    import threading
+    threading.Thread(target=_update, daemon=True).start()

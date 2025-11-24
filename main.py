@@ -1,4 +1,7 @@
 # main.py
+# import eventlet  # Disabled due to environment constraints
+# eventlet.monkey_patch()  # Disabled
+
 from flask import Flask
 from extensions import socketio
 
@@ -15,6 +18,47 @@ app.config['SECRET_KEY'] = 'dev_secret_key'
 
 # socketio 객체에 app을 연결
 socketio.init_app(app, cors_allowed_origins="*")
+
+# 🔥 [NEW] Leaderboard API
+from flask import jsonify
+try:
+    from firebase_admin_config import get_db
+    from firebase_admin import firestore as admin_firestore
+    FIREBASE_AVAILABLE = True
+except Exception as e:
+    FIREBASE_AVAILABLE = False
+    print(f"⚠️ Firebase Admin not available for leaderboard: {e}")
+
+@app.route("/api/leaderboard", methods=["GET"])
+def get_leaderboard():
+    if not FIREBASE_AVAILABLE:
+        return jsonify({"error": "Firebase not configured"}), 503
+    
+    try:
+        db = get_db()
+        if not db:
+            return jsonify({"error": "Database connection failed"}), 500
+            
+        # money 내림차순 정렬, 상위 20명
+        users_ref = db.collection("users")
+        query = users_ref.order_by("money", direction=admin_firestore.Query.DESCENDING).limit(20)
+        docs = query.stream()
+        
+        leaderboard = []
+        for doc in docs:
+            data = doc.to_dict()
+            leaderboard.append({
+                "uid": doc.id,
+                "nickname": data.get("nickname", "Unknown"),
+                "major": data.get("major", ""),
+                "year": data.get("year", ""),
+                "money": data.get("money", 0)
+            })
+            
+        return jsonify(leaderboard)
+    except Exception as e:
+        print(f"❌ Leaderboard error: {e}")
+        return jsonify({"error": str(e)}), 500
 
 if __name__ == "__main__":
     print("🚀 서버 실행 (http://localhost:5000)")
