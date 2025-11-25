@@ -32,8 +32,9 @@ worker_tmp_dir = '/dev/shm'  # Use shared memory for better performance
 # For debugging
 reload = False
 
-# Preload application for better memory efficiency
-preload_app = True
+# preload_app - DISABLED for eventlet compatibility
+# With eventlet worker, preload_app=True causes "blocking functions from mainloop" error
+preload_app = False
 
 # Worker lifecycle hooks for cleanup
 def on_starting(server):
