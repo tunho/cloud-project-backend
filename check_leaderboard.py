@@ -19,7 +19,7 @@ def check_ranking():
         if not firebase_admin._apps:
             cred = credentials.Certificate(service_key_path)
             firebase_admin.initialize_app(cred)
-            print("✅ Firebase initialized successfully.")
+            # print("✅ Firebase initialized successfully.")
         
         db = firestore.client()
         
@@ -29,33 +29,28 @@ def check_ranking():
 
     # 2. 랭킹 조회
     try:
-        print("\n🏆 Fetching Leaderboard (Top 20)...")
-        print("-" * 50)
-        print(f"{'Rank':<6} {'Nickname':<20} {'Major':<15} {'Money':>10}")
-        print("-" * 50)
-
         users_ref = db.collection("users")
         # money 내림차순 정렬
         query = users_ref.order_by("money", direction=firestore.Query.DESCENDING).limit(20)
         docs = query.stream()
 
-        count = 0
-        for i, doc in enumerate(docs):
+        leaderboard = []
+        for doc in docs:
             data = doc.to_dict()
-            nickname = data.get("nickname", "Unknown")
-            major = data.get("major", "-")
-            money = data.get("money", 0)
-            
-            print(f"{i+1:<6} {nickname:<20} {major:<15} {money:>10,}")
-            count += 1
+            leaderboard.append({
+                "uid": doc.id,
+                "nickname": data.get("nickname", "Unknown"),
+                "major": data.get("major", ""),
+                "year": data.get("year", ""),
+                "money": data.get("money", 0)
+            })
 
-        if count == 0:
-            print("No users found.")
-            
-        print("-" * 50)
+        import json
+        print(json.dumps(leaderboard))
 
     except Exception as e:
-        print(f"❌ Error fetching leaderboard: {e}")
+        import json
+        print(json.dumps({"error": str(e)}))
 
 if __name__ == "__main__":
     check_ranking()

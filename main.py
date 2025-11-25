@@ -37,32 +37,45 @@ except Exception as e:
     print(f"⚠️ Firebase Admin not available for leaderboard: {e}")
 
 @app.route("/api/leaderboard", methods=["GET"])
+@app.route("/api/leaderboard", methods=["GET"])
 def get_leaderboard():
-    if not FIREBASE_AVAILABLE:
-        return jsonify({"error": "Firebase not configured"}), 503
+    # 🔥 [FIX] Use subprocess to avoid gRPC hang in Gunicorn
+    import subprocess
+    import json
+    import sys
     
     try:
-        db = get_db()
-        if not db:
-            return jsonify({"error": "Database connection failed"}), 500
-            
-        # money 내림차순 정렬, 상위 20명
-        users_ref = db.collection("users")
-        query = users_ref.order_by("money", direction=admin_firestore.Query.DESCENDING).limit(20)
-        docs = query.stream()
+        # Run the standalone script
+        script_path = os.path.join(os.path.dirname(__file__), 'check_leaderboard.py')
         
-        leaderboard = []
-        for doc in docs:
-            data = doc.to_dict()
-            leaderboard.append({
-                "uid": doc.id,
-                "nickname": data.get("nickname", "Unknown"),
-                "major": data.get("major", ""),
-                "year": data.get("year", ""),
-                "money": data.get("money", 0)
-            })
+        # Use the same python interpreter
+        result = subprocess.run(
+            [sys.executable, script_path],
+            capture_output=True,
+            text=True,
+            timeout=10 # 10 seconds timeout
+        )
+        
+        if result.returncode != 0:
+            print(f"❌ Subprocess error: {result.stderr}")
+            return jsonify({"error": "Failed to fetch leaderboard"}), 500
             
-        return jsonify(leaderboard)
+        # Parse JSON output
+        # The script might print other things (like initialization logs), so we need to find the JSON part
+        # But our modified script only prints JSON at the end ideally.
+        # Let's assume the script output is pure JSON or the last line is JSON.
+        output = result.stdout.strip()
+        
+        # Filter out potential initialization logs if any (simple heuristic: find start of list)
+        json_start = output.find('[')
+        if json_start != -1:
+            output = output[json_start:]
+            
+        data = json.loads(output)
+        return jsonify(data)
+        
+    except subprocess.TimeoutExpired:
+        return jsonify({"error": "Timeout fetching leaderboard"}), 504
     except Exception as e:
         print(f"❌ Leaderboard error: {e}")
         return jsonify({"error": str(e)}), 500
