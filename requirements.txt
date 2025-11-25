@@ -9,7 +9,7 @@ charset-normalizer==3.4.4
 click==8.3.1
 cryptography==46.0.3
 dataclasses==0.6
-dnspython==2.8.0
+dnspython==2.6.1  # Fixed version for eventlet compatibility
 eventlet==0.40.3
 firebase_admin==7.1.0
 Flask==3.1.2

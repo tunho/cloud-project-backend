@@ -4,7 +4,7 @@ import multiprocessing
 
 # Worker class - CRITICAL for SocketIO
 # Must use eventlet or gevent worker class
-worker_class = 'eventlet'
+worker_class = "gevent"
 
 # Number of worker processes
 workers = 1  # SocketIO requires single worker for in-memory state

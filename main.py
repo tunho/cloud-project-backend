@@ -50,25 +50,38 @@ def get_leaderboard():
         if not db:
             return jsonify({"error": "Database connection failed"}), 500
         
+        # 🔥 [FIX] Set shorter timeout to prevent blocking
         users_ref = db.collection("users")
         query = users_ref.order_by("money", direction=admin_firestore.Query.DESCENDING).limit(20)
-        docs = query.stream()
-
+        
+        # Stream with timeout handling
         leaderboard = []
-        for doc in docs:
-            d = doc.to_dict()
-            leaderboard.append({
-                "uid": doc.id,
-                "nickname": d.get("nickname", "Unknown"),
-                "major": d.get("major", ""),
-                "year": d.get("year", ""),
-                "money": d.get("money", 0)
-            })
+        doc_count = 0
+        try:
+            for doc in query.stream(timeout=10.0):  # 🔥 10 second timeout
+                d = doc.to_dict()
+                leaderboard.append({
+                    "uid": doc.id,
+                    "nickname": d.get("nickname", "Unknown"),
+                    "major": d.get("major", ""),
+                    "year": d.get("year", ""),
+                    "money": d.get("money", 0)
+                })
+                doc_count += 1
+                if doc_count >= 20:  # Safety limit
+                    break
+        except Exception as stream_error:
+            print(f"⚠️ Leaderboard stream error: {stream_error}")
+            # Return partial results if any
+            if leaderboard:
+                return jsonify(leaderboard)
+            raise
 
         return jsonify(leaderboard)
     except Exception as e:
         print(f"❌ Leaderboard error: {e}")
-        return jsonify({"error": str(e)}), 500
+        # Return empty list instead of 500 error
+        return jsonify([]), 200  # 🔥 Return empty instead of error
 
 
 # ========== LOCAL TEST MODE ==========
