@@ -1,9 +1,7 @@
 # main.py
-from gevent import monkey
-monkey.patch_all()
+# 🔥 [CRITICAL] Do NOT import gevent or eventlet.
+# We are using 'threading' mode to ensure compatibility with Firebase (gRPC).
 
-# import eventlet  # Disabled due to environment constraints
-# eventlet.monkey_patch()  # Disabled
 
 from flask import Flask
 from extensions import socketio
