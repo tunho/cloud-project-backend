@@ -2,6 +2,12 @@
 # 🔥 [CRITICAL] Do NOT import gevent or eventlet.
 # We are using 'threading' mode to ensure compatibility with Firebase (gRPC).
 
+import os
+# 🔥 [FIX] gRPC Stability Settings for Gunicorn/Linux
+# Prevent gRPC from trying to handle forking logic (since we lazy load post-fork)
+os.environ["GRPC_ENABLE_FORK_SUPPORT"] = "0"
+# Force standard polling to avoid epoll deadlocks in some environments
+os.environ["GRPC_POLL_STRATEGY"] = "poll"
 
 from flask import Flask
 from extensions import socketio
