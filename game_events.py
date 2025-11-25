@@ -8,6 +8,7 @@ from extensions import socketio
 from state import rooms
 from models import GameState, Player, Color, TurnPhase, Optional # 👈 TurnPhase 임포트
 from utils import find_player_by_sid, find_player_by_uid, get_room, broadcast_in_game_state, serialize_state_for_lobby, update_user_money_async # 🔥 [NEW]
+import eventlet  # 🔥 [NEW] For non-blocking delays
 
 from game_logic import (
     prepare_tiles, deal_initial_hands, start_turn_from, 
@@ -59,10 +60,9 @@ def start_game_flow(room_id: str):
     print(f"📡 game_started 이벤트 전송 완료 -> 프론트엔드 씬 전환 대기")
 
     # 5. 프론트엔드 로딩 대기 (Vue 컴포넌트가 마운트되고 소켓 리스너를 켤 시간 확보)
-    socketio.sleep(1)
-
-    # 6. 첫 번째 턴 시작 (DRAWING 단계로 진입)
-    start_next_turn(room_id)
+    # 🔥 [FIX] Use eventlet.spawn_after instead of blocking sleep
+    eventlet.spawn_after(1, start_next_turn, room_id)
+    # Note: This returns immediately, allowing worker to handle other requests
 
 
 def start_next_turn(room_id: str, reason: str = None):
@@ -509,8 +509,8 @@ def on_animation_done(data):
     # 그래야 마지막 카드가 뒤집힌 상태(eliminated)가 프론트엔드에 반영됨
     broadcast_in_game_state(room_id)
 
-    # Slight delay before checking game end to allow UI to process state update
-    socketio.sleep(0.3)
+    # 🔥 [FIX] Remove blocking sleep - state is already broadcast, no need to wait
+    # UI will update asynchronously when it receives the state
 
     # 2. 게임 종료 조건 확인 (순위 없는 플레이어가 1명 이하일 때)
     # 🔥 [FIX] Check unranked_count, not alive_count!
@@ -532,7 +532,7 @@ def on_animation_done(data):
 
         # Ensure UI receives final state before game_over
         broadcast_in_game_state(room_id)
-        socketio.sleep(0.5)
+        # 🔥 [FIX] Remove blocking sleep - state broadcast is synchronous
 
         # 게임 종료 이벤트 전송 (handle_winnings에서 payout_result를 보내지만, 명시적 game_over도 보냄)
         winner = next((p for p in gs.players if p.final_rank == 1), None)

@@ -34,6 +34,10 @@ app.config['SECRET_KEY'] = "dev_secret_key"
 # SocketIO
 socketio.init_app(app, cors_allowed_origins="*")
 
+# ========= Health Check Endpoints ===========
+from health_check import health_bp
+app.register_blueprint(health_bp)
+
 
 # ========= Leaderboard API ===========
 @app.route("/api/leaderboard", methods=["GET"])
