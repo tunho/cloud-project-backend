@@ -14,8 +14,8 @@ def get_db():
         return _db_client
     
     # 🔥 [FIX] Force Disable Firebase to prevent Eventlet/gRPC crash
-    print("⚠️ Firebase disabled for server stability.")
-    return None
+    # print("⚠️ Firebase disabled for server stability.")
+    # return None
 
     # Initialize Firebase Admin ONLY when first needed
     # if not firebase_admin._apps:

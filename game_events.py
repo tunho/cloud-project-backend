@@ -174,8 +174,85 @@ def set_turn_phase(room_id: str, phase: TurnPhase, broadcast: bool = True, reaso
         broadcast_in_game_state(room_id)
 
 
+def eliminate_player(room_id: str, player: Player, reason: str = "eliminated"):
+    """
+    플레이어를 탈락 처리하고 관련 정산 및 게임 종료 확인을 수행하는 공통 함수
+    reason: "timeout", "disconnect", "wrong_guess" (future use)
+    """
+    gs = get_room(room_id)
+    if not gs: return False
+
+    print(f"💀 [Eliminate] Eliminating {player.nickname} (Reason: {reason})")
+
+    # 1. 모든 카드 공개
+    for tile in player.hand:
+        tile.revealed = True
+    print(f"🃏 [Eliminate] All cards revealed for {player.nickname}")
+
+    # 2. 순위 산정 (현재 순위 없는 사람 수 = 내 순위)
+    if player.final_rank == 0:
+        unranked_players = [p for p in gs.players if p.final_rank == 0]
+        unranked_count = len(unranked_players)
+        player.final_rank = unranked_count
+        print(f"🥇 [Eliminate] Rank assigned: {player.final_rank} (unranked_count was {unranked_count})")
+        
+        socketio.emit("game:player_eliminated", {
+            "uid": player.uid,
+            "nickname": player.nickname,
+            "rank": player.final_rank
+        }, room=room_id)
+
+        # 3. 즉시 패배 정산 (돈 차감)
+        if not player.settled:
+            net_change = -player.bet_amount
+            player.money += net_change
+            player.settled = True
+            
+            payout_data = {
+                "uid": player.uid,
+                "nickname": player.nickname,
+                "rank": player.final_rank,
+                "bet": player.bet_amount,
+                "net_change": net_change,
+                "new_total": player.money
+            }
+            if gs.payout_results is None: gs.payout_results = []
+            gs.payout_results.append(payout_data)
+            
+            socketio.emit("game:payout_result", [payout_data], room=room_id)
+            print(f"💰 [Eliminate] Settlement processed. Net: {net_change}")
+
+            # Firestore 업데이트
+            if FIREBASE_AVAILABLE:
+                update_user_money_async(player.uid, net_change, player.nickname)
+
+    # 4. 상태 업데이트 전송
+    broadcast_in_game_state(room_id)
+
+    # 5. 게임 종료 조건 확인 (남은 순위 없는 플레이어가 1명 이하)
+    unranked_remaining = [p for p in gs.players if p.final_rank == 0]
+    print(f"🔍 [Eliminate] Checking game end: unranked_remaining={len(unranked_remaining)}")
+    
+    if len(unranked_remaining) <= 1:
+        print(f"🏆 게임 종료! ({reason}로 인한 종료)")
+        if len(unranked_remaining) == 1:
+            winner = unranked_remaining[0]
+            winner.final_rank = 1
+            print(f"🏆 [DEBUG] Winner {winner.nickname} assigned rank 1")
+        
+        handle_winnings(room_id)
+        
+        winner = next((p for p in gs.players if p.final_rank == 1), None)
+        socketio.emit("game_over", {
+            "winner": {"name": winner.nickname if winner else "Unknown"}
+        }, room=room_id)
+        return True # 게임 종료됨
+    
+    return False # 게임 계속됨
+
+
 def handle_timeout(room_id: str, player_uid: str, expected_phase: TurnPhase):
-    """타임아웃 처리 -> 단순히 턴만 넘김"""
+    """타임아웃 처리 -> 플레이어 탈락(패배) 처리"""
     gs = rooms.get(room_id)
 
     if not gs:
@@ -188,23 +265,19 @@ def handle_timeout(room_id: str, player_uid: str, expected_phase: TurnPhase):
         print(f"타임아웃 무시: (uid: {player_uid}, phase: {expected_phase})")
         return
 
-    print(f"⏰ 타임아웃 발생! {player.nickname} 님의 턴을 넘깁니다.")
+    print(f"⏰ 타임아웃 발생! {player.nickname} 님을 탈락 처리합니다.")
     
     # 타이머 취소
     if gs.turn_timer:
         gs.turn_timer.cancel()
         gs.turn_timer = None
     
-    # 🔥 [NEW] 타임아웃 시 랜덤 카드 하나 공개 (페널티)
-    unrevealed_cards = [card for card in player.hand if not card.revealed]
-    if unrevealed_cards:
-        import random
-        card_to_reveal = random.choice(unrevealed_cards)
-        card_to_reveal.revealed = True
-        print(f"🃏 타임아웃 페널티: {player.nickname}의 카드 {card_to_reveal.color} {card_to_reveal.number} 공개됨")
+    # 🔥 [FIX] 타임아웃 = 패배 처리
+    game_ended = eliminate_player(room_id, player, reason="timeout")
 
-    # 다음 턴으로 (패배 처리 없음)
-    start_next_turn(room_id, reason="timeout")
+    if not game_ended:
+        # 게임이 안 끝났으면 다음 턴으로
+        start_next_turn(room_id, reason="timeout")
 
 
 # ... (이벤트 핸들러들 생략) ...
@@ -458,11 +531,13 @@ def on_animation_done(data):
     # 방금 탈락한 플레이어 찾기 (final_rank가 0인데 eliminated 상태인 경우)
     for p in gs.players:
         if p.final_rank == 0 and is_player_eliminated(p):
-            # 🔥 [FIX] Assign rank based on UNRANKED count (includes this player!)
+            # 🔥 [FIX] Use unranked_count (same fix as on_animation_done)
+            # Count players who haven't been ranked yet
+            # 🔥 [REFACTOR] Use eliminate_player logic here too?
+            # For now, keep inline to avoid breaking animation flow, but logic is identical
             p.final_rank = unranked_count
             print(f"🔥 [DEBUG] Assigning rank {unranked_count} to {p.nickname} (was eliminated)")
             unranked_count -= 1
-            print(f"🔥 [DEBUG] Decremented unranked_count to {unranked_count}")
 
             # Reveal all cards of eliminated player
             for tile in p.hand:
@@ -486,20 +561,24 @@ def on_animation_done(data):
                 p.settled = True
 
                 print(f"💰 [Settlement] Player {p.nickname} eliminated. Bet: {p.bet_amount}, Net: {net_change}") # 🔥 [LOG]
+                
+                # 정산 결과 저장 및 전송
+                payout_data = {
+                    "uid": p.uid,
+                    "nickname": p.nickname,
+                    "rank": p.final_rank,
+                    "bet": p.bet_amount,
+                    "net_change": net_change,
+                    "new_total": p.money
+                }
+                if gs.payout_results is None: gs.payout_results = []
+                gs.payout_results.append(payout_data)
+
+                socketio.emit("game:payout_result", [payout_data], room=room_id)
 
                 # Firestore 업데이트 (패배 패널티 - 비동기)
                 if FIREBASE_AVAILABLE:
                     update_user_money_async(p.uid, net_change, p.nickname)
-
-            # 🔥 [NEW] 정산 결과 전송 -⟶ GameOverModal 띄우기 위함
-            socketio.emit("game:payout_result", [{
-                "uid": p.uid,
-                "nickname": p.nickname,
-                "rank": p.final_rank,
-                "bet": p.bet_amount,
-                "net_change": net_change,
-                "new_total": p.money
-            }], room=room_id)
 
             # Broadcast again after payout result to ensure UI sync
             broadcast_in_game_state(room_id)
@@ -602,80 +681,19 @@ def on_leave_game(data):
 
         if game_started:
             print(f"⚠️ {player.nickname} 님이 나가기 버튼을 눌러 패배 처리됩니다.")
+            TURN_TIMER_SECONDS = 60
+            # 1. 기존 타이머 취소
+            if gs.turn_timer:
+                gs.turn_timer.cancel()
+                gs.turn_timer = None
             
-            # (1) 모든 카드 공개
-            for tile in player.hand:
-                tile.revealed = True
-            print(f"🃏 [Leave] Cards revealed.")
-            
-            # (2) 탈락 처리 및 순위 산정
-            if player.final_rank == 0:
-                # 🔥 [FIX] Use unranked_count (same fix as on_animation_done)
-                # Count players who haven't been ranked yet
-                unranked_players = [p for p in gs.players if p.final_rank == 0]
-                unranked_count = len(unranked_players)
-                player.final_rank = unranked_count
-                print(f"🥇 [Leave] Rank assigned: {player.final_rank} (unranked_count was {unranked_count})")
-                
-                socketio.emit("game:player_eliminated", {
-                    "uid": player.uid,
-                    "nickname": player.nickname,
-                    "rank": player.final_rank
-                }, room=room_id)
-                print(f"📡 [Leave] game:player_eliminated emitted.")
-
-                # (3) 즉시 패배 정산 (돈 차감)
-                if not player.settled:
-                    net_change = -player.bet_amount
-                    player.money += net_change
-                    player.settled = True
-                    print(f"💰 [Leave] Settlement processed.")
-                    
-                    # 정산 결과 저장 및 전송 (UI 먼저 갱신!)
-                    payout_data = {
-                        "uid": player.uid,
-                        "nickname": player.nickname,
-                        "rank": player.final_rank,
-                        "bet": player.bet_amount,
-                        "net_change": net_change,
-                        "new_total": player.money
-                    }
-                    gs.payout_results.append(payout_data)
-                    
-                    socketio.emit("game:payout_result", [payout_data], room=room_id)
-                    print(f"📡 [Leave] game:payout_result emitted.")
-
-                    # 🔥 [NEW] 상태 브로드캐스트 (카드 공개 및 탈락 반영) - 이것도 DB 저장 전에!
-                    broadcast_in_game_state(room_id)
-                    
-                    # Firestore 업데이트 (DB 저장은 나중에 - 비동기)
-                    if FIREBASE_AVAILABLE:
-                        update_user_money_async(player.uid, net_change, player.nickname)
+            # 🔥 [FIX] Use eliminate_player helper
+            game_ended = eliminate_player(room_id, player, reason="disconnect")
 
             # 3. 턴 넘기기 (만약 내 턴이었다면)
-            if gs.players[gs.current_turn].sid == player.sid:
+            if not game_ended and gs.players[gs.current_turn].sid == player.sid:
                 print("내 턴에 나갔으므로 턴을 넘깁니다.")
                 if gs.turn_timer: gs.turn_timer.cancel()
-                start_next_turn(room_id)
-            # else:
-            #    # 내 턴이 아니더라도 상태 업데이트는 필요 (카드 공개됨) -> 위에서 이미 함
-            #    broadcast_in_game_state(room_id)
-
-            # 4. 게임 종료 조건 확인 (남은 순위 없는 플레이어가 1명 이하)
-            # 🔥 [FIX] Use unranked_count for consistency with on_animation_done
-            unranked_remaining = [p for p in gs.players if p.final_rank == 0]
-            if len(unranked_remaining) <= 1:
-                print(f"🏆 게임 종료! (나가기로 인한 종료)")
-                if len(unranked_remaining) == 1:
-                    winner = unranked_remaining[0]
-                    winner.final_rank = 1
-                
-                handle_winnings(room_id)
-                
-                winner = next((p for p in gs.players if p.final_rank == 1), None)
-                socketio.emit("game_over", {
-                    "winner": {"name": winner.nickname if winner else "Unknown"}
-                }, room=room_id)
 
         # 2. 플레이어 제거 (게임 중이 아닐 때만!)
         if not game_started:

@@ -1,4 +1,7 @@
 # main.py
+from gevent import monkey
+monkey.patch_all()
+
 # import eventlet  # Disabled due to environment constraints
 # eventlet.monkey_patch()  # Disabled
 
