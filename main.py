@@ -26,6 +26,11 @@ app.config['SECRET_KEY'] = 'dev_secret_key'
 # socketio 객체에 app을 연결
 socketio.init_app(app, cors_allowed_origins="*")
 
+# 🔥 [NEW] AWS ALB Health Check Endpoint
+@app.route("/health")
+def health_check():
+    return "OK", 200
+
 # 🔥 [NEW] Leaderboard API
 from flask import jsonify
 try:
@@ -36,49 +41,9 @@ except Exception as e:
     FIREBASE_AVAILABLE = False
     print(f"⚠️ Firebase Admin not available for leaderboard: {e}")
 
-@app.route("/api/leaderboard", methods=["GET"])
-@app.route("/api/leaderboard", methods=["GET"])
-def get_leaderboard():
-    # 🔥 [FIX] Use subprocess to avoid gRPC hang in Gunicorn
-    import subprocess
-    import json
-    import sys
-    
-    try:
-        # Run the standalone script
-        script_path = os.path.join(os.path.dirname(__file__), 'check_leaderboard.py')
-        
-        # Use the same python interpreter
-        result = subprocess.run(
-            [sys.executable, script_path],
-            capture_output=True,
-            text=True,
-            timeout=10 # 10 seconds timeout
-        )
-        
-        if result.returncode != 0:
-            print(f"❌ Subprocess error: {result.stderr}")
-            return jsonify({"error": "Failed to fetch leaderboard"}), 500
-            
-        # Parse JSON output
-        # The script might print other things (like initialization logs), so we need to find the JSON part
-        # But our modified script only prints JSON at the end ideally.
-        # Let's assume the script output is pure JSON or the last line is JSON.
-        output = result.stdout.strip()
-        
-        # Filter out potential initialization logs if any (simple heuristic: find start of list)
-        json_start = output.find('[')
-        if json_start != -1:
-            output = output[json_start:]
-            
-        data = json.loads(output)
-        return jsonify(data)
-        
-    except subprocess.TimeoutExpired:
-        return jsonify({"error": "Timeout fetching leaderboard"}), 504
-    except Exception as e:
-        print(f"❌ Leaderboard error: {e}")
-        return jsonify({"error": str(e)}), 500
+# 🔥 [REMOVED] Leaderboard API - Migrated to Frontend Client SDK
+# The frontend now fetches leaderboard data directly from Firestore using the Client SDK.
+# This avoids gRPC conflicts with the Admin SDK in the Gunicorn environment.
 
 if __name__ == "__main__":
     print("🚀 서버 실행 (http://localhost:5000)")
