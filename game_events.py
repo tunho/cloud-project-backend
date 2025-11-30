@@ -284,6 +284,14 @@ def eliminate_player(room_id: str, player: Player, reason: str = "eliminated"):
         handle_winnings(room_id)
         
         winner = next((p for p in gs.players if p.final_rank == 1), None)
+        
+        # 🔥 [FIX] Omok phase update
+        if getattr(gs, 'game_type', 'davinci') == 'omok' and gs.game_state:
+            gs.game_state.phase = 'GAME_OVER'
+            gs.game_state.winner = winner
+            # Broadcast state so OmokView sees phase change
+            broadcast_in_game_state(room_id)
+
         socketio.emit("game_over", {
             "winner": {"name": winner.nickname if winner else "Unknown"}
         }, room=room_id)
@@ -759,17 +767,48 @@ def on_leave_game(data):
             print(f"⚠️ {player.nickname} 님이 나가기 버튼을 눌러 패배 처리됩니다.")
             TURN_TIMER_SECONDS = 60
             # 1. 기존 타이머 취소
-            if gs.turn_timer:
-                gs.turn_timer.cancel()
-                gs.turn_timer = None
+            # 1. 기존 타이머 취소
+            if game_state and hasattr(game_state, 'turn_timer') and game_state.turn_timer:
+                game_state.turn_timer.cancel()
+                game_state.turn_timer = None
             
             # 🔥 [FIX] Use eliminate_player helper
             game_ended = eliminate_player(room_id, player, reason="disconnect")
 
             # 3. 턴 넘기기 (만약 내 턴이었다면)
-            if not game_ended and gs.players[gs.current_turn].sid == player.sid:
-                print("내 턴에 나갔으므로 턴을 넘깁니다.")
-                if gs.turn_timer: gs.turn_timer.cancel()
+            if not game_ended:
+                is_omok = getattr(gs, 'game_type', 'davinci') == 'omok'
+                should_pass_turn = False
+                
+                if is_omok:
+                    omok_logic = gs.game_state
+                    if omok_logic and omok_logic.players:
+                         if omok_logic.current_turn_index < len(omok_logic.players):
+                             current_player = omok_logic.players[omok_logic.current_turn_index]
+                             if current_player.sid == player.sid:
+                                 should_pass_turn = True
+                else:
+                    if game_state and hasattr(game_state, 'current_turn') and game_state.players:
+                        if game_state.current_turn < len(game_state.players):
+                            if game_state.players[game_state.current_turn].sid == player.sid:
+                                should_pass_turn = True
+
+                if should_pass_turn:
+                    print("내 턴에 나갔으므로 턴을 넘깁니다.")
+                    if game_state and hasattr(game_state, 'turn_timer') and game_state.turn_timer:
+                        game_state.turn_timer.cancel()
+                    
+                    if is_omok:
+                         # Switch turn index (0->1, 1->0)
+                        omok_logic.current_turn_index = 1 - omok_logic.current_turn_index
+                        from game_events import start_omok_turn
+                        try:
+                            start_omok_turn(room_id)
+                        except Exception as e:
+                            print(f"❌ start_omok_turn failed: {e}")
+                    else:
+                        from game_events import start_next_turn
+                        start_next_turn(room_id)
 
         # 2. 플레이어 제거 (게임 중이 아닐 때만!)
         if not game_started:
