@@ -3,31 +3,47 @@ import uuid
 from flask import request
 from flask_socketio import emit, join_room, leave_room
 from extensions import socketio
-from state import rooms, queue
+from extensions import socketio
+# 🔥 [MODIFIED] Split queue into game types
+queues = {
+    'davinci': [],
+    'omok': []
+}
+from state import rooms # queue is now local
 # ▼▼▼ (수정) find_player_by_uid 임포트 ▼▼▼
 from utils import (
     get_room, find_player_by_sid, find_player_by_uid, 
     broadcast_in_game_state, serialize_state_for_lobby
 )
-from models import Player, GameState, Optional
+from models import Player, GameState, Optional, Room # 👈 Room 추가
 from game_events import start_game_flow
 
 def broadcast_queue_status():
     """현재 대기열에 있는 모든 플레이어에게 최신 큐 상태를 전송"""
-    global queue
-    count = len(queue)
-    print(f"Broadcasting queue status: {count} players")
+    global queues
     
-    for p in queue:
-        emit("queue_status", 
-             {"status": "waiting", "count": count, "max": 4}, 
-             to=p["sid"])
+    for game_type, queue in queues.items():
+        count = len(queue)
+        max_players = 4 if game_type == 'davinci' else 2
+        
+        print(f"Broadcasting {game_type} queue status: {count} players")
+        
+        for p in queue:
+            emit("queue_status", 
+                 {"status": "waiting", "count": count, "max": max_players, "gameType": game_type}, 
+                 to=p["sid"])
 
 @socketio.on("join_queue")
 def on_join_queue(data):
-    global queue
+    global queues
     sid = request.sid
-    bet_amount = int(data.get("betAmount", 10000)) # 🔥 [FIX] Ensure int
+    bet_amount = int(data.get("betAmount", 10000))
+    game_type = data.get("gameType", "davinci") # Default to davinci
+    
+    if game_type not in queues:
+        game_type = 'davinci'
+        
+    queue = queues[game_type]
     
     # ▼▼▼ [추가된 필드 추출] ▼▼▼
     uid = data.get("uid")
@@ -52,7 +68,7 @@ def on_join_queue(data):
     # ▼▼▼ [수정] 이미 대기열에 있는 경우 SID 업데이트 ▼▼▼
     existing_player_index = next((i for i, p in enumerate(queue) if p["uid"] == uid), -1)
     if existing_player_index != -1:
-        print(f"🔄 대기열 재접속: {nickname} (기존 SID: {queue[existing_player_index]['sid']} -> 신규 SID: {sid})")
+        print(f"🔄 대기열 재접속 ({game_type}): {nickname} (기존 SID: {queue[existing_player_index]['sid']} -> 신규 SID: {sid})")
         queue[existing_player_index]["sid"] = sid
         # 필요한 경우 다른 정보도 업데이트 (예: 돈, 닉네임 등 변경되었을 수 있음)
         queue[existing_player_index]["money"] = money
@@ -62,7 +78,7 @@ def on_join_queue(data):
         return
     # ▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲▲
     
-    print(f"-> 큐 참가: {nickname} ({sid}) Bet: {bet_amount}")  # 🔥 name -> nickname
+    print(f"-> {game_type} 큐 참가: {nickname} ({sid}) Bet: {bet_amount}")
     queue.append({
         # ▼▼▼ [수정됨] sid와 uid를 명시적으로 저장 ▼▼▼
         "sid": sid,             # 👈 [필수] 이 키를 추가합니다.
@@ -74,7 +90,8 @@ def on_join_queue(data):
         "major": major,
         "money": money,
         "year": year,
-        "bet_amount": bet_amount
+        "bet_amount": bet_amount,
+        "game_type": game_type
     })
     
     broadcast_queue_status()
@@ -83,9 +100,12 @@ def on_join_queue(data):
 @socketio.on("leave_queue")
 def on_leave_queue():
     """플레이어가 '대기 취소'를 눌렀을 때"""
-    global queue
+    global queues
     sid = request.sid
-    queue = [p for p in queue if p["sid"] != sid]
+    
+    for game_type in queues:
+        queues[game_type] = [p for p in queues[game_type] if p["sid"] != sid]
+        
     print(f"<- 큐 이탈: {sid}")
     emit("queue_status", {"status": "idle"}, to=sid)
     broadcast_queue_status()
@@ -93,105 +113,112 @@ def on_leave_queue():
 # lobby_events.py
 
 def check_queue_match():
-    """대기열을 확인하여 4명이 모이면 게임을 시작시킴 (안전 버전)"""
-    global queue
+    """대기열을 확인하여 게임을 시작시킴"""
+    global queues
     
-    if len(queue) >= 4:
-        # 1. 일단 4명을 꺼냄
-        players_to_match_data = [queue.pop(0) for _ in range(4)]
+    for game_type, queue in queues.items():
+        required_players = 4 if game_type == 'davinci' else 2
         
-        room_id = str(uuid.uuid4())[:8]
-        gs = get_room(room_id)
-        
-        players_to_match = []
-        player_names = []
-        valid_players_count = 0
-
-        for i, player_data in enumerate(players_to_match_data):
-            # Player 객체 생성
-            player = Player(
-                sid=player_data["sid"],
-                uid=player_data["uid"], 
-                id=i,
-                name=player_data["name"],
-                nickname=player_data["nickname"],
-                email=player_data["email"],
-                major=player_data["major"],
-                money=player_data["money"],
-                year=player_data["year"],
-                bet_amount=player_data["bet_amount"],
-                hand=[],
-                last_drawn_index=None
-            )
+        if len(queue) >= required_players:
+            # 1. 플레이어 꺼냄
+            players_to_match_data = [queue.pop(0) for _ in range(required_players)]
             
-            # ▼▼▼ [중요] 강제 입장 시도 (예외 처리) ▼▼▼
-            try:
-                join_room(room_id, sid=player.sid)
-                # 성공적으로 방에 들어간 경우에만 리스트에 추가
-                players_to_match.append(player)
-                player_names.append(player.nickname)
-                valid_players_count += 1
+            room_id = str(uuid.uuid4())[:8]
+            # 🔥 [FIX] Create Room object explicitly instead of using get_room (which creates GameState)
+            new_room = Room(room_id, f"Match_{room_id}", game_type=game_type)
+            rooms[room_id] = new_room
+            gs = new_room
+            # gs.game_type = game_type # Already set in init
+        
+            players_to_match = []
+            player_names = []
+            valid_players_count = 0
+
+            for i, player_data in enumerate(players_to_match_data):
+                # Player 객체 생성
+                player = Player(
+                    sid=player_data["sid"],
+                    uid=player_data["uid"], 
+                    id=i,
+                    name=player_data["name"],
+                    nickname=player_data["nickname"],
+                    email=player_data["email"],
+                    major=player_data["major"],
+                    money=player_data["money"],
+                    year=player_data["year"],
+                    bet_amount=player_data["bet_amount"],
+                    hand=[],
+                    last_drawn_index=None
+                )
                 
-                # 매칭 성공 메시지 전송
-                match_data = {
+                # ▼▼▼ [중요] 강제 입장 시도 (예외 처리) ▼▼▼
+                try:
+                    join_room(room_id, sid=player.sid)
+                    # 성공적으로 방에 들어간 경우에만 리스트에 추가
+                    players_to_match.append(player)
+                    player_names.append(player.nickname)
+                    valid_players_count += 1
+                    
+                    # 매칭 성공 메시지 전송
+                    match_data = {
+                        "roomId": room_id,
+                        "players": [] # 아직 다 안 찼으므로 나중에 보낼 수도 있음 (일단 비워둠 or 현재까지 이름)
+                    }
+                    # 여기서 보내지 말고 4명 다 성공하면 보내는 게 나음
+                    
+                except KeyError:
+                    # 이미 연결이 끊긴 유령 플레이어
+                    print(f"⚠️ 매칭 실패: {player.name} ({player.sid}) 유저가 연결되지 않음.")
+                    # 이 유저는 버립니다.
+                except Exception as e:
+                    print(f"⚠️ 입장 오류: {e}")
+
+            # 2. 모두 정상적으로 방에 들어갔는지 확인
+            if valid_players_count == required_players:
+                print(f"🎉 매칭 확정! 방 ID: {room_id}")
+                
+                # GameState에 플레이어 등록
+                gs.players = players_to_match
+                
+                # 각 플레이어에게 매칭 성공 신호 전송
+                final_match_data = {
                     "roomId": room_id,
-                    "players": [] # 아직 다 안 찼으므로 나중에 보낼 수도 있음 (일단 비워둠 or 현재까지 이름)
+                    "players": player_names
                 }
-                # 여기서 보내지 말고 4명 다 성공하면 보내는 게 나음
+                socketio.emit("match:success", final_match_data, room=room_id)
+
+                print(f"🚪 방 생성 {room_id}. 플레이어: {', '.join(player_names)}")
+                broadcast_queue_status()
+
+                # 게임 시작
+                socketio.start_background_task(start_game_flow, room_id)
                 
-            except KeyError:
-                # 이미 연결이 끊긴 유령 플레이어
-                print(f"⚠️ 매칭 실패: {player.name} ({player.sid}) 유저가 연결되지 않음.")
-                # 이 유저는 버립니다.
-            except Exception as e:
-                print(f"⚠️ 입장 오류: {e}")
-
-        # 2. 4명 모두 정상적으로 방에 들어갔는지 확인
-        if valid_players_count == 4:
-            print(f"🎉 매칭 확정! 방 ID: {room_id}")
-            
-            # GameState에 플레이어 등록
-            gs.players = players_to_match
-            
-            # 각 플레이어에게 매칭 성공 신호 전송
-            final_match_data = {
-                "roomId": room_id,
-                "players": player_names
-            }
-            socketio.emit("match:success", final_match_data, room=room_id)
-
-            print(f"🚪 방 생성 {room_id}. 플레이어: {', '.join(player_names)}")
-            broadcast_queue_status()
-
-            # 게임 시작
-            socketio.start_background_task(start_game_flow, room_id)
-            
-        else:
-            # 🚨 4명이 안 모임 (누군가 튕김) -> 매칭 취소 및 롤백
-            print("❌ 매칭 실패: 플레이어 중 일부가 연결이 끊겨 매칭이 취소되었습니다.")
-            
-            # 방금 만든 방 삭제
-            if room_id in rooms:
-                del rooms[room_id]
-            
-            # 정상적인 플레이어들은 다시 대기열의 '맨 앞'으로 돌려보냄 (우선순위 보장)
-            # 거꾸로 넣어야 순서가 유지됨
-            for p in reversed(players_to_match):
-                # 원래 데이터 형태로 복구
-                original_data = {
-                    "sid": p.sid, "uid": p.uid, "name": p.name,
-                    "nickname": p.nickname, "email": p.email, "major": p.major,
-                    "money": p.money, "year": p.year, "bet_amount": p.bet_amount
-                }
-                queue.insert(0, original_data)
+            else:
+                # 🚨 4명이 안 모임 (누군가 튕김) -> 매칭 취소 및 롤백
+                print("❌ 매칭 실패: 플레이어 중 일부가 연결이 끊겨 매칭이 취소되었습니다.")
                 
-                # 방금 들어갔던 방에서 나오게 함
-                leave_room(room_id, sid=p.sid)
+                # 방금 만든 방 삭제
+                if room_id in rooms:
+                    del rooms[room_id]
+                
+                # 정상적인 플레이어들은 다시 대기열의 '맨 앞'으로 돌려보냄 (우선순위 보장)
+                # 거꾸로 넣어야 순서가 유지됨
+                for p in reversed(players_to_match):
+                    # 원래 데이터 형태로 복구
+                    original_data = {
+                        "sid": p.sid, "uid": p.uid, "name": p.name,
+                        "nickname": p.nickname, "email": p.email, "major": p.major,
+                        "money": p.money, "year": p.year, "bet_amount": p.bet_amount
+                    }
+                    queue.insert(0, original_data)
+                    
+                    # 방금 들어갔던 방에서 나오게 함
+                    leave_room(room_id, sid=p.sid)
 
-            broadcast_queue_status()
-            
-            # (선택) 다시 매칭 시도할지 여부
-            # check_queue_match() # 재귀 호출은 위험할 수 있으니 일단 대기
+                broadcast_queue_status()
+                
+                # (선택) 다시 매칭 시도할지 여부
+                # check_queue_match() # 재귀 호출은 위험할 수 있으니 일단 대기
 
 
 @socketio.on("create_room")
@@ -205,19 +232,32 @@ def on_create_room(data):
     nickname = data.get("nickname", name)
     email = data.get("email", "N/A")
     major = data.get("major", "N/A")
+    room_name = data.get('roomName')
+    password = data.get('password')
+    game_type = data.get('gameType', 'davinci') # Default to davinci
     money = data.get("money", 0)  # 👈 money 추출
     year = data.get("year", 0)
 
     if not uid:
         return
+    if not room_name:
+        return
 
-    room_id = str(uuid.uuid4())[:6]
-    while room_id in rooms:
-        room_id = str(uuid.uuid4())[:6]
+    room_id = str(uuid.uuid4())[:8]
+    new_room = Room(room_id, room_name, password, game_type=game_type)
+    # new_room.game_type = game_type # Already set in init
+    while room_id in rooms: # This loop should ideally check for new_room.id in rooms
+        room_id = str(uuid.uuid4())[:8] # Changed to [:8]
+        new_room.room_id = room_id # Update the room_id for the new_room object
         
     print(f"✨ 방 생성 요청: {name} -> new room {room_id}")
 
-    gs = get_room(room_id)
+    # 🔥 [FIX] Store the Room object in the rooms dictionary!
+    rooms[room_id] = new_room
+    gs = new_room
+    
+    print(f"DEBUG: Room {room_id} created. Type: {type(gs)}")
+
     host_player = Player(
         sid=sid,
         uid=uid, 
@@ -233,10 +273,20 @@ def on_create_room(data):
         bet_amount=0,  # 👈 커스텀 방이므로 베팅 금액은 0
     )
     gs.players.append(host_player)
+    print(f"DEBUG: Host player added. Players: {len(gs.players)}")
     
     join_room(room_id, sid=sid)
     emit("room_created", {"roomId": room_id}, to=sid)
-    socketio.emit("room_state", serialize_state_for_lobby(gs), room=room_id)
+    
+    print("DEBUG: Calling serialize_state_for_lobby...")
+    try:
+        serialized_state = serialize_state_for_lobby(gs)
+        print(f"DEBUG: Serialized state: {serialized_state}")
+        socketio.emit("room_state", serialized_state, room=room_id)
+    except Exception as e:
+        print(f"❌ Error serializing state: {e}")
+        import traceback
+        traceback.print_exc()
 
 
 # ▼▼▼ (수정) 로컬 정의 삭제 (utils에서 임포트) ▼▼▼
@@ -269,10 +319,24 @@ def on_enter_room(data):
     if not room_id or not uid or room_id not in rooms:
         return
 
-    gs = get_room(room_id)
+    # 🔥 [FIX] Handle Room object correctly
+    room = get_room(room_id)
+    if not room: return
+    gs = room # Keep variable name gs for minimal diff, but treat as Room
+    
     existing_player = find_player_by_uid(gs, uid)
     
-    game_started = bool(gs.piles["black"] or gs.piles["white"])
+    # Check game_started based on game type
+    game_started = False
+    if gs.game_type == 'omok':
+        if gs.game_state and gs.game_state.phase != 'INIT': # Assuming INIT is default or check board
+             game_started = True
+    else:
+        # Davinci
+        if gs.game_state and (gs.game_state.piles["black"] or gs.game_state.piles["white"]):
+            game_started = True
+        elif gs.status == 'playing':
+            game_started = True
 
     # --------------------------
     # ① 재접속 처리

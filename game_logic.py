@@ -179,3 +179,19 @@ def is_player_eliminated(player: Player) -> bool:
 def get_alive_players(gs: GameState) -> List[Player]:
     """탈락하지 않은 플레이어 목록 반환"""
     return [p for p in gs.players if not is_player_eliminated(p)]
+
+class GameLogic(GameState):
+    def __init__(self, players: List[Player]):
+        super().__init__(
+            players=players,
+            piles={},
+            same_number_order="black-first",
+            current_turn=0,
+            drawn_tile=None,
+            pending_placement=False,
+            can_place_anywhere=False,
+            next_tile_id=0
+        )
+        # Initialize game
+        prepare_tiles(self)
+        deal_initial_hands(self)

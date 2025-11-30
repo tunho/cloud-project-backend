@@ -33,6 +33,26 @@ class Tile:
             "revealed": self.revealed
         }
 
+# Assuming a Room class is intended to be added or modified,
+# as the provided __init__ method clearly belongs to a Room class
+# and the instruction mentions "Update Room init".
+# Since no Room class exists in the provided document,
+# I am adding a new Room class with the specified __init__ method.
+@dataclass
+class Room:
+    room_id: str
+    name: str
+    password: Optional[str] = None
+    game_type: str = 'davinci'
+    max_players: int = field(init=False)
+    players: List[Any] = field(default_factory=list) # List of Player objects
+    game_state: Optional[Any] = None # Game state object
+    status: str = 'waiting' # waiting, playing
+
+    def __post_init__(self):
+        # This logic is derived from the provided __init__
+        self.max_players = 2 if self.game_type == 'omok' else 4
+
 
 @dataclass
 class Player:

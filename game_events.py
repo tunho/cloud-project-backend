@@ -5,9 +5,12 @@ from threading import Timer
 from flask import request
 from flask_socketio import emit
 from extensions import socketio
-from state import rooms
-from models import GameState, Player, Color, TurnPhase, Optional # 👈 TurnPhase 임포트
-from utils import find_player_by_sid, find_player_by_uid, get_room, broadcast_in_game_state, serialize_state_for_lobby, update_user_money_async # 🔥 [NEW]
+from game_logic import GameLogic
+from omok_logic import OmokLogic
+from omok_logic import OmokLogic
+from models import Player, Color, TurnPhase, Optional, GameState # 👈 GameState 추가
+from state import rooms # 👈 rooms 임포트
+from utils import find_player_by_sid, find_player_by_uid, get_room, broadcast_in_game_state, serialize_state_for_lobby, update_user_money_async
 
 from game_logic import (
     prepare_tiles, deal_initial_hands, start_turn_from, 
@@ -47,27 +50,58 @@ def start_game_flow(room_id: str):
     print(f"🚀 게임 시작 루틴 실행: {room_id}")
 
     # 2. 게임 데이터 초기화 (로직)
-    prepare_tiles(gs)        # 검정/흰색 타일 섞기
-    deal_initial_hands(gs)   # 플레이어들에게 초기 패 분배 (3개 또는 4개)
+    if gs.game_type == 'omok':
+        # 오목 초기화
+        if gs.game_state is None:
+            gs.game_state = OmokLogic(gs.players)
+    else:
+        # 다빈치 초기화
+        if gs.game_state is None:
+            gs.game_state = GameLogic(gs.players)
+            
+        prepare_tiles(gs.game_state)        # 검정/흰색 타일 섞기
+        deal_initial_hands(gs.game_state)   # 플레이어들에게 초기 패 분배 (3개 또는 4개)
 
     # 3. 상태 플래그 설정
-    gs.game_started = True
-    gs.current_turn = -1     # start_next_turn에서 +1을 하여 0번(첫 번째) 플레이어가 되도록 설정
+    gs.status = 'playing'
+    # gs.current_turn = -1 # OmokLogic handles this internally or we sync
 
     # 4. 프론트엔드에 '게임 시작' 알림 (Lobby -> Game 화면 전환용)
-    socketio.emit("game_started", {"roomId": room_id}, room=room_id)
+    socketio.emit("game_started", {"roomId": room_id, "gameType": gs.game_type}, room=room_id)
     print(f"📡 game_started 이벤트 전송 완료 -> 프론트엔드 씬 전환 대기")
 
     # 5. 프론트엔드 로딩 대기 (Vue 컴포넌트가 마운트되고 소켓 리스너를 켤 시간 확보)
     socketio.sleep(1)
 
-    # 6. 첫 번째 턴 시작 (DRAWING 단계로 진입)
-    start_next_turn(room_id)
+    # 6. 첫 번째 턴 시작
+    if gs.game_type == 'omok':
+        start_omok_turn(room_id)
+    else:
+        gs.game_state.current_turn = -1
+        start_next_turn(room_id)
+
+
+def start_omok_turn(room_id: str):
+    """오목 턴 시작 알림"""
+    gs = get_room(room_id)
+    if not gs or not gs.game_state: return
+    
+    omok_logic = gs.game_state
+    current_player = omok_logic.players[omok_logic.current_turn_index]
+    
+    print(f"--- [Omok] {current_player.nickname} 님의 턴 시작 ---")
+    
+    socketio.emit("omok:turn_start", {
+        "currentTurnUid": current_player.uid,
+        "timer": 30 # 오목 턴 시간
+    }, room=room_id)
 
 
 def start_next_turn(room_id: str, reason: str = None):
     """(수정) 다음 턴을 시작 (드로우 또는 추리) - 플레이어 퇴장 시에도 안정적"""
-    gs = get_room(room_id)
+    room = get_room(room_id)
+    if not room: return
+    gs = room.game_state
     if not gs: return
 
     # 🔥 [수정] 생존자 먼저 확인
@@ -120,7 +154,11 @@ def set_turn_phase(room_id: str, phase: TurnPhase, broadcast: bool = True, reaso
     broadcast: False이면 상태 전송을 건너뜀 (애니메이션 등 특수 상황용)
     """
     print(f"[{room_id}] set_turn_phase 호출됨: {phase}, reason={reason}")
-    gs = get_room(room_id)
+    room = get_room(room_id)
+    if not room:
+        print(f"[{room_id}] set_turn_phase 실패: room not found")
+        return
+    gs = room.game_state
     player = get_current_player(gs)
     if not gs or not player:
         print(f"[{room_id}] set_turn_phase 실패: gs or player not found")
@@ -179,7 +217,9 @@ def eliminate_player(room_id: str, player: Player, reason: str = "eliminated"):
     플레이어를 탈락 처리하고 관련 정산 및 게임 종료 확인을 수행하는 공통 함수
     reason: "timeout", "disconnect", "wrong_guess" (future use)
     """
-    gs = get_room(room_id)
+    room = get_room(room_id)
+    if not room: return False
+    gs = room.game_state
     if not gs: return False
 
     print(f"💀 [Eliminate] Eliminating {player.nickname} (Reason: {reason})")
@@ -253,11 +293,13 @@ def eliminate_player(room_id: str, player: Player, reason: str = "eliminated"):
 
 def handle_timeout(room_id: str, player_uid: str, expected_phase: TurnPhase):
     """타임아웃 처리 -> 플레이어 탈락(패배) 처리"""
-    gs = rooms.get(room_id)
+    room = rooms.get(room_id)
 
-    if not gs:
+    if not room:
         print(f"타임아웃 무시: room {room_id}가 이미 삭제됨.")
         return
+    gs = room.game_state
+    if not gs: return
 
     player = get_current_player(gs)
 
@@ -285,7 +327,9 @@ def handle_timeout(room_id: str, player_uid: str, expected_phase: TurnPhase):
 def handle_winnings(room_id: str):
     """(수정) 게임 종료 후 랭킹과 개인 베팅 금액에 따라 화폐를 계산하고 정산"""
     print(f"💰 [handle_winnings] Called for {room_id}")
-    gs = get_room(room_id)
+    room = get_room(room_id)
+    if not room: return
+    gs = room.game_state
     if not gs: return
 
     # 1. Assign ranks: winner gets 1, others get sequential ranks based on existing final_rank or order
@@ -383,10 +427,14 @@ def on_draw_tile(data):
     room_id = data.get("roomId")
     color = data.get("color")  # "black" or "white"
     
-    gs = get_room(room_id)
+    room = get_room(room_id)
+    if not room: return
+    gs = room.game_state
+    if not gs: return
+    
     player = find_player_by_sid(gs, request.sid)
     
-    if not gs or not player:
+    if not player:
         return
     
     if gs.turn_phase != "DRAWING":
@@ -414,10 +462,14 @@ def on_place_joker(data):
     room_id = data.get("roomId")
     index = data.get("index")
     
-    gs = get_room(room_id)
+    room = get_room(room_id)
+    if not room: return
+    gs = room.game_state
+    if not gs: return
+
     player = find_player_by_sid(gs, request.sid)
     
-    if not gs or not player:
+    if not player:
         return
     
     if gs.turn_phase != "PLACE_JOKER":
@@ -445,10 +497,14 @@ def on_guess_value(data):
     index = data.get("index")
     value = data.get("value")
     
-    gs = get_room(room_id)
+    room = get_room(room_id)
+    if not room: return
+    gs = room.game_state
+    if not gs: return
+
     guesser = find_player_by_sid(gs, request.sid)
     
-    if not gs or not guesser:
+    if not guesser:
         return
     
     if gs.turn_phase not in ["GUESSING", "POST_SUCCESS_GUESS"]:
@@ -480,7 +536,9 @@ def on_guess_value(data):
 def on_stop_guessing(data):
     """플레이어가 연속 추리를 멈추고 턴을 넘길 때 호출됨"""
     room_id = data.get("roomId")
-    gs = get_room(room_id)
+    room = get_room(room_id)
+    if not room: return
+    gs = room.game_state
     if not gs:
         return
     
@@ -505,7 +563,10 @@ def on_animation_done(data):
 
     if not room_id or not guesser_uid: return
     
-    gs = get_room(room_id)
+    room = get_room(room_id)
+    if not room: return
+    gs = room.game_state
+    if not gs: return
     player = find_player_by_uid(gs, guesser_uid)
     
     # 검증: 현재 턴 플레이어만 이 신호를 보낼 수 있게 함 (중복 처리 방지)
@@ -698,8 +759,13 @@ def on_leave_game(data):
         # 2. 플레이어 제거 (게임 중이 아닐 때만!)
         if not game_started:
             if player in gs.players:
-                gs.players.remove(player)
-                print(f"🗑️ {player.name} removed from room {room_id}")
+                # 게임 시작 로직
+                if room.game_type == 'omok':
+                    room.game_state = OmokLogic(room.players)
+                else:
+                    room.game_state = GameLogic(room.players)
+                    
+                room.status = 'playing'
 
             # 3. 방이 비었거나 로비 상태라면 정리
             if gs.players:
@@ -715,5 +781,59 @@ def on_leave_game(data):
 
     except Exception as e:
         print(f"❌ Error in on_leave_game: {e}")
+
+@socketio.on("omok:place_stone")
+def on_omok_place_stone(data):
+    """오목 돌 두기 요청"""
+    room_id = data.get("roomId")
+    x = data.get("x")
+    y = data.get("y")
+    
+    gs = get_room(room_id)
+    player = find_player_by_sid(gs, request.sid)
+    
+    if not gs or not player or not gs.game_state:
+        return
+        
+    omok_logic = gs.game_state
+    
+    # 돌 두기 시도
+    success, message = omok_logic.place_stone(player.sid, x, y)
+    
+    if success:
+        # 보드 업데이트 브로드캐스트
+        socketio.emit("omok:update_board", {
+            "board": omok_logic.board,
+            "lastMove": {"x": x, "y": y, "color": omok_logic.board[y][x]}
+        }, room=room_id)
+        
+        # 게임 종료 체크
+        if omok_logic.phase == 'GAME_OVER':
+            winner = omok_logic.winner
+            print(f"🏆 [Omok] Game Over! Winner: {winner.nickname}")
+            
+            # 정산 처리
+            handle_winnings(room_id) # OmokLogic already updated money/pot, but handle_winnings does DB sync/broadcast
+            # Note: handle_winnings logic in game_events might be tailored for Davinci.
+            # Let's check handle_winnings. If it relies on final_rank, we need to set it.
+            
+            # Set ranks for handle_winnings
+            winner.final_rank = 1
+            loser = next(p for p in gs.players if p != winner)
+            loser.final_rank = 2
+            
+            handle_winnings(room_id)
+            
+            socketio.emit("game_over", {
+                "winner": {"name": winner.nickname}
+            }, room=room_id)
+            
+        else:
+            # 다음 턴 진행
+            start_omok_turn(room_id)
+            
+    else:
+        # 에러 전송
+        emit("error_message", {"message": message})
         import traceback
         traceback.print_exc()

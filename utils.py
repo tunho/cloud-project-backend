@@ -55,13 +55,34 @@ def serialize_player(p: Player, is_self: bool = False) -> Dict[str, Any]:
 
 # (신규) 이 함수는 이제 '로비'에서만 사용합니다.
 # (게임 중에는 아래의 broadcast_in_game_state가 사용됩니다)
-def serialize_state_for_lobby(gs: GameState) -> Dict[str, Any]:
+def serialize_state_for_lobby(gs: Any) -> Dict[str, Any]:
+    # gs can be Room or GameState
+    players = gs.players
+    
+    # Default values
+    same_number_order = "black-first"
+    current_turn = 0
+    
+    # If gs is Room and has game_state, use it
+    if hasattr(gs, 'game_state') and gs.game_state:
+        # Check if game_state has attributes (it could be OmokLogic or GameLogic)
+        if hasattr(gs.game_state, 'same_number_order'):
+            same_number_order = gs.game_state.same_number_order
+        if hasattr(gs.game_state, 'current_turn'):
+            current_turn = gs.game_state.current_turn
+        elif hasattr(gs.game_state, 'current_turn_index'): # OmokLogic
+            current_turn = gs.game_state.current_turn_index
+            
+    elif hasattr(gs, 'same_number_order'): # gs is GameState
+        same_number_order = gs.same_number_order
+        current_turn = gs.current_turn
+
     return {
         # 로비에서는 숨길 카드가 없으므로 is_self=True로 모두 공개
-        "players": [serialize_player(p, is_self=True) for p in gs.players],
+        "players": [serialize_player(p, is_self=True) for p in players],
         "piles": { "black": 0, "white": 0 }, # 로비에서는 0
-        "sameNumberOrder": gs.same_number_order,
-        "currentTurn": gs.current_turn,
+        "sameNumberOrder": same_number_order,
+        "currentTurn": current_turn,
         "drawnTile": None,
         "pendingPlacement": False,
         "canPlaceAnywhere": False,
@@ -100,8 +121,21 @@ def find_player_by_uid(gs: GameState, uid: str) -> Optional[Player]:
 # 기존 broadcast_state 함수를 '인게임용'으로 완전히 교체합니다.
 def broadcast_in_game_state(room_id: str):
     """(신규) 인게임 전용, 각 플레이어에게 '개인화된' 상태 전송"""
-    gs = get_room(room_id)
-    if not gs or not gs.players:
+    room = get_room(room_id)
+    if not room: return
+    
+    # 🔥 [FIX] Handle Room object
+    gs = room.game_state
+    if not gs: return
+
+    # If Omok, we might skip this or handle differently
+    if getattr(room, 'game_type', 'davinci') == 'omok':
+        # Omok uses different events (omok:update_board, omok:turn_start)
+        # But we might want to send player list updates if needed.
+        # For now, just return to prevent crash in Davinci logic
+        return
+
+    if not gs.players:
         return
 
     current_player_sid = None
@@ -124,7 +158,7 @@ def broadcast_in_game_state(room_id: str):
                             "white": len(gs.piles["white"]),
             },
             "sameNumberOrder": gs.same_number_order,
-            "currentTurn": gs.current_turn, # 프론트가 턴을 식별하기 위함
+            "currentTurn": gs.current_turn, # 인덱스
             "pendingPlacement": gs.pending_placement,
             "canPlaceAnywhere": gs.can_place_anywhere,
 
