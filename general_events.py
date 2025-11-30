@@ -46,9 +46,25 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
                 # [요청사항] 연결 끊김(새로고침/창닫기) 시 즉시 탈락 및 정산 처리
                 
                 # 1. 게임 중이라면 패배 처리 및 정산
-                # 🔥 [FIX] 더미가 비어있어도 게임 중일 수 있음. gs.game_started 플래그 또는 패를 가지고 있는지 확인
+                # 1. 게임 중이라면 패배 처리 및 정산
+                # 🔥 [FIX] Handle Room object
+                game_state = gs.game_state if hasattr(gs, 'game_state') else gs
+                
                 has_cards = len(player.hand) > 0
-                game_started = gs.game_started or (gs.turn_phase != "INIT") or has_cards
+                print(f"🔍 [Disconnect Debug] uid={player.uid}, has_cards={has_cards}, hand_len={len(player.hand)}")
+                
+                # Check game_started based on game type
+                game_started = False
+                if getattr(gs, 'game_type', 'davinci') == 'omok':
+                     if game_state and getattr(game_state, 'phase', 'INIT') != 'INIT':
+                         game_started = True
+                else:
+                    # Davinci
+                    if game_state: # 🔥 [FIX] Check if game_state exists
+                        if hasattr(game_state, 'game_started') and game_state.game_started:
+                             game_started = True
+                        elif hasattr(game_state, 'turn_phase'):
+                            game_started = (game_state.turn_phase != "INIT") or has_cards
                 
                 if game_started:
                     print(f"⚠️ {player.nickname} 님이 이탈하여 패배 처리되고 배팅 금액을 모두 잃습니다.")
@@ -60,14 +76,20 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
                     
                     # (2) 탈락 처리 및 순위 산정
                     if player.final_rank == 0:
-                        from game_logic import get_alive_players
-                        alive_players = get_alive_players(gs)
-                        # 남은 생존자 수 + 1 = 내 순위 (예: 2명 남았을 때 죽으면 3등)
-                        # 하지만 이미 alive_players에는 내가 포함되어 있을 수 있음 (아직 remove 안했으므로)
-                        # get_alive_players는 final_rank==0인 사람만 반환함.
-                        # 내가 아직 final_rank가 0이면 alive_players에 포함됨.
-                        
-                        player.final_rank = len(alive_players) + 1 # 🔥 [FIX] +1 
+                        if getattr(gs, 'game_type', 'davinci') == 'omok':
+                             # Omok: Alive if final_rank is 0
+                             alive_players = [p for p in gs.players if p.final_rank == 0]
+                             # If 2 players, alive=2. Leaver gets rank 2.
+                             player.final_rank = len(alive_players)
+                        else:
+                            from game_logic import get_alive_players
+                            alive_players = get_alive_players(gs)
+                            # 남은 생존자 수 + 1 = 내 순위 (예: 2명 남았을 때 죽으면 3등)
+                            # 하지만 이미 alive_players에는 내가 포함되어 있을 수 있음 (아직 remove 안했으므로)
+                            # get_alive_players는 final_rank==0인 사람만 반환함.
+                            # 내가 아직 final_rank가 0이면 alive_players에 포함됨.
+                            
+                            player.final_rank = len(alive_players) + 1 # 🔥 [FIX] +1 
                         
                         socketio.emit("game:player_eliminated", {
                             "uid": player.uid,
@@ -90,7 +112,8 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
                                 "net_change": net_change,
                                 "new_total": player.money
                             }
-                            gs.payout_results.append(payout_data) # 🔥 [FIX] 정산 결과 저장 (재접속 시 전송용)
+                            if game_state and hasattr(game_state, 'payout_results'):
+                                game_state.payout_results.append(payout_data) # 🔥 [FIX] 정산 결과 저장 (재접속 시 전송용)
                             
                             socketio.emit("game:payout_result", [payout_data], room=room_id)
 
@@ -102,23 +125,51 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
                                 update_user_money_async(player.uid, net_change, player.nickname)
     
                     # (4) 턴 넘기기 (내 턴이었다면)
-                    if gs.players and gs.current_turn < len(gs.players):
-                        if gs.players[gs.current_turn].sid == player.sid:
-                            print(f"[{room_id}] 턴 플레이어 이탈 -> 턴 넘김 (Direct Call)")
-                            if gs.turn_timer: gs.turn_timer.cancel()
+                    is_omok = getattr(gs, 'game_type', 'davinci') == 'omok'
+                    should_pass_turn = False
+                    
+                    if is_omok:
+                        omok_logic = gs.game_state
+                        if omok_logic and omok_logic.players:
+                             # OmokLogic players might be different objects if re-instantiated, but usually same list ref
+                             # Use index to be safe
+                             if omok_logic.current_turn_index < len(omok_logic.players):
+                                 current_player = omok_logic.players[omok_logic.current_turn_index]
+                                 if current_player.sid == player.sid:
+                                     should_pass_turn = True
+                    else:
+                        if game_state and hasattr(game_state, 'current_turn') and game_state.players:
+                            if game_state.current_turn < len(game_state.players):
+                                if game_state.players[game_state.current_turn].sid == player.sid:
+                                    should_pass_turn = True
+
+                    if should_pass_turn:
+                        print(f"[{room_id}] 턴 플레이어 이탈 -> 턴 넘김 (Direct Call)")
+                        if game_state and hasattr(game_state, 'turn_timer') and game_state.turn_timer:
+                             game_state.turn_timer.cancel()
+                        
+                        if is_omok:
+                            # Switch turn index (0->1, 1->0)
+                            omok_logic.current_turn_index = 1 - omok_logic.current_turn_index
+                            from game_events import start_omok_turn
+                            try:
+                                start_omok_turn(room_id)
+                            except Exception as e:
+                                print(f"❌ start_omok_turn failed: {e}")
+                        else:
                             from game_events import start_next_turn
                             try:
                                 start_next_turn(room_id)
                             except Exception as e:
                                 print(f"❌ start_next_turn failed: {e}")
-                        # else: broadcast_in_game_state(room_id) # 이미 위에서 함
     
                     # (5) 게임 종료 조건 확인
-                    from game_logic import get_alive_players
-                    alive_players = get_alive_players(gs)
-                    
-                    # 나를 제외한 생존자가 1명 이하면 게임 종료
-                    # (내가 이미 final_rank가 설정되었으므로 get_alive_players에는 포함되지 않음)
+                    # Recalculate alive players (since one might have been eliminated above)
+                    if is_omok:
+                         alive_players = [p for p in gs.players if p.final_rank == 0]
+                    else:
+                        from game_logic import get_alive_players
+                        alive_players = get_alive_players(gs)
                     
                     if len(alive_players) <= 1:
                         print(f"🏆 게임 종료! (이탈로 인한 종료)")
@@ -130,12 +181,20 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
                         handle_winnings(room_id)
                         
                         winner = next((p for p in gs.players if p.final_rank == 1), None)
+                        
                         socketio.emit("game_over", {
                             "winner": {"name": winner.nickname if winner else "Unknown"}
                         }, room=room_id)
+                        
+                        if is_omok:
+                            gs.game_state.phase = 'GAME_OVER'
+                            gs.game_state.winner = winner
+                            # Broadcast state so OmokView sees phase change
+                            broadcast_in_game_state(room_id)
     
                 # 2. 플레이어 제거 (게임 중이 아닐 때만!)
-                print(f"🔍 [Disconnect] game_started={game_started}, phase={gs.turn_phase}") # Debug
+                phase = getattr(game_state, 'turn_phase', 'Unknown') if game_state else 'Unknown'
+                print(f"🔍 [Disconnect] game_started={game_started}, phase={phase}") # Debug
                 if not game_started:
                     if player in gs.players:
                         gs.players.remove(player)

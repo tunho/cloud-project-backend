@@ -86,6 +86,7 @@ def serialize_state_for_lobby(gs: Any) -> Dict[str, Any]:
         "drawnTile": None,
         "pendingPlacement": False,
         "canPlaceAnywhere": False,
+        "gameType": getattr(gs, 'game_type', 'davinci') # 🔥 [FIX] gameType 전송
     }
 
 # --- 공통 유틸리티 ---
@@ -128,11 +129,18 @@ def broadcast_in_game_state(room_id: str):
     gs = room.game_state
     if not gs: return
 
-    # If Omok, we might skip this or handle differently
+    # If Omok, handle separately
     if getattr(room, 'game_type', 'davinci') == 'omok':
-        # Omok uses different events (omok:update_board, omok:turn_start)
-        # But we might want to send player list updates if needed.
-        # For now, just return to prevent crash in Davinci logic
+        # Serialize Omok state
+        omok_state = {
+            "players": [serialize_player(p, is_self=(p.sid == p.sid)) for p in gs.players], # is_self logic simplified
+            "board": gs.board,
+            "currentTurn": gs.players[gs.current_turn_index].id if gs.players else 0, # Send ID or Index? Frontend expects ID if matching PlayerCard
+            "phase": gs.phase,
+            "pot": 0, # Omok doesn't have pot yet
+            "winner": None # Handle winner if needed
+        }
+        socketio.emit("state_update", omok_state, room=room_id)
         return
 
     if not gs.players:
@@ -152,16 +160,14 @@ def broadcast_in_game_state(room_id: str):
                 # 본인(is_self=True)과 타인(is_self=False)을 구분하여 직렬화
                 serialize_player(p, is_self=(p.sid == p_to_send.sid)) 
                 for p in gs.players
-                    ],
+            ],
             "piles": {
-                            "black": len(gs.piles["black"]),
-                            "white": len(gs.piles["white"]),
+                "black": len(gs.piles["black"]),
+                "white": len(gs.piles["white"]),
             },
             "sameNumberOrder": gs.same_number_order,
             "currentTurn": gs.current_turn, # 인덱스
-            "pendingPlacement": gs.pending_placement,
-            "canPlaceAnywhere": gs.can_place_anywhere,
-
+            
             # (보안) '뽑은 타일'은 현재 턴인 사람에게만 값을 보여줌
             "drawnTile": serialize_tile(gs.drawn_tile, is_self=is_current_turn_player),
             "phase": gs.turn_phase, # 🔥 [FIX] Refresh 시 페이즈 정보 전송

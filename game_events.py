@@ -61,6 +61,7 @@ def start_game_flow(room_id: str):
             
         prepare_tiles(gs.game_state)        # 검정/흰색 타일 섞기
         deal_initial_hands(gs.game_state)   # 플레이어들에게 초기 패 분배 (3개 또는 4개)
+        gs.game_state.game_started = True   # 🔥 [FIX] 명시적으로 게임 시작 플래그 설정
 
     # 3. 상태 플래그 설정
     gs.status = 'playing'
@@ -736,9 +737,23 @@ def on_leave_game(data):
 
     try:
         # 1. 게임 중이라면 패배 처리 및 정산
-        # 🔥 [FIX] 더미가 비어있어도 게임 중일 수 있음. gs.game_started 플래그 또는 패를 가지고 있는지 확인
+        # 🔥 [FIX] Handle Room object
+        game_state = gs.game_state if hasattr(gs, 'game_state') else gs
+        
         has_cards = len(player.hand) > 0
-        game_started = gs.game_started or (gs.turn_phase != "INIT") or has_cards
+        
+        # Check game_started based on game type
+        game_started = False
+        if getattr(gs, 'game_type', 'davinci') == 'omok':
+             if game_state and getattr(game_state, 'phase', 'INIT') != 'INIT':
+                 game_started = True
+        else:
+            # Davinci
+            if game_state:
+                if hasattr(game_state, 'game_started'):
+                    game_started = game_state.game_started
+                elif hasattr(game_state, 'turn_phase'):
+                    game_started = (game_state.turn_phase != "INIT") or has_cards
 
         if game_started:
             print(f"⚠️ {player.nickname} 님이 나가기 버튼을 눌러 패배 처리됩니다.")
