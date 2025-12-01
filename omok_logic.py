@@ -7,6 +7,11 @@ class OmokLogic:
         self.phase = 'PLAYING' # PLAYING, GAME_OVER
         self.winner = None
         self.pot = 0
+        self.winner = None
+        self.pot = 0
+        self.payout_results = None # 🔥 [FIX] Store payout results for settlement
+        self.turn_timer = None # 🔥 [FIX] Timer instance for timeout handling
+        self.winning_line = [] # 🔥 [NEW] Store winning line coordinates
         
         # Assign colors (Player 0: Black, Player 1: White)
         # Assuming players list is shuffled or fixed order.
@@ -16,16 +21,12 @@ class OmokLogic:
         # For simplicity, let's say ante is handled outside or passed in.
         # But here we can just track it if needed.
         # Let's assume ante was deducted before start or we deduct here.
-        self.ante = 1000
+        # Use bet_amount set in lobby
+        # Use bet_amount set in lobby
         for p in self.players:
-            if p.money >= self.ante:
-                p.money -= self.ante
-                p.bet_amount = self.ante
-                self.pot += self.ante
-            else:
-                p.bet_amount = p.money
-                self.pot += p.money
-                p.money = 0
+            bet = p.bet_amount
+            # Just track pot, don't deduct from player.money yet (handled in handle_winnings)
+            self.pot += bet
 
     def get_state(self):
         return {
@@ -57,7 +58,10 @@ class OmokLogic:
         self.board[y][x] = stone_color
         
         # Check win
-        if self.check_win(x, y, stone_color):
+        is_win, winning_line = self.check_win(x, y, stone_color)
+        if is_win:
+            self.winning_line = winning_line # Store winning line
+            print(f"🏆 [OMOK] Win detected! Line: {self.winning_line}") # Debug log
             self.end_game(current_player)
         else:
             self.switch_turn()
@@ -76,26 +80,26 @@ class OmokLogic:
         ]
         
         for dx, dy in directions:
-            count = 1
+            winning_stones = [(x, y)]
             
             # Check forward
             nx, ny = x + dx, y + dy
             while 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[ny][nx] == color:
-                count += 1
+                winning_stones.append((nx, ny))
                 nx += dx
                 ny += dy
                 
             # Check backward
             nx, ny = x - dx, y - dy
             while 0 <= nx < self.board_size and 0 <= ny < self.board_size and self.board[ny][nx] == color:
-                count += 1
+                winning_stones.append((nx, ny))
                 nx -= dx
                 ny -= dy
                 
-            if count >= 5:
-                return True
+            if len(winning_stones) >= 5:
+                return True, winning_stones
                 
-        return False
+        return False, []
 
     def end_game(self, winner):
         self.phase = 'GAME_OVER'

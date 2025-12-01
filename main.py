@@ -47,4 +47,6 @@ except Exception as e:
 
 if __name__ == "__main__":
     print("🚀 서버 실행 (http://localhost:5000)")
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True)
+    # 🔥 [FIX] allow_unsafe_werkzeug=True to prevent "write() before start_response" error
+    # 🔥 [FIX] use_reloader=False to prevent thread conflict with Werkzeug
+    socketio.run(app, host="0.0.0.0", port=5000, debug=True, allow_unsafe_werkzeug=True, use_reloader=False)

@@ -2,8 +2,9 @@
 import uuid
 from flask import request
 from flask_socketio import emit, join_room, leave_room
-from extensions import socketio
-from extensions import socketio
+from flask_socketio import emit, join_room, leave_room
+from flask_socketio import emit, join_room, leave_room
+from extensions import socketio, get_db, FIREBASE_AVAILABLE # 🔥 [FIX] Import get_db instead of db
 # 🔥 [MODIFIED] Split queue into game types
 queues = {
     'davinci': [],
@@ -64,6 +65,23 @@ def on_join_queue(data):
     if not uid:
         return
 
+    # 🔥 [FIX] Fetch fresh user data from Firestore
+    if FIREBASE_AVAILABLE:
+        try:
+            db = get_db() # 🔥 Get db instance
+            user_ref = db.collection("users").document(uid)
+            doc = user_ref.get()
+            if doc.exists:
+                user_data = doc.to_dict()
+                money = user_data.get("money", 0)
+                nickname = user_data.get("nickname", nickname)
+                character = user_data.get("character", None) # 🔥 [FIX] Fetch character data
+                # Update other fields if needed
+                print(f"✅ Fetched fresh data for {nickname}: Money={money}, Character={character is not None}")
+        except Exception as e:
+            print(f"⚠️ Failed to fetch user data: {e}")
+            character = None # Default if fetch fails
+
 
     # ▼▼▼ [수정] 이미 대기열에 있는 경우 SID 업데이트 ▼▼▼
     existing_player_index = next((i for i, p in enumerate(queue) if p["uid"] == uid), -1)
@@ -73,6 +91,8 @@ def on_join_queue(data):
         # 필요한 경우 다른 정보도 업데이트 (예: 돈, 닉네임 등 변경되었을 수 있음)
         queue[existing_player_index]["money"] = money
         queue[existing_player_index]["bet_amount"] = bet_amount
+        if character:
+            queue[existing_player_index]["character"] = character # 🔥 [FIX] Update character
         
         broadcast_queue_status()
         return
@@ -91,7 +111,8 @@ def on_join_queue(data):
         "money": money,
         "year": year,
         "bet_amount": bet_amount,
-        "game_type": game_type
+        "game_type": game_type,
+        "character": character # 🔥 [FIX] Include character data in queue
     })
     
     broadcast_queue_status()
@@ -148,7 +169,8 @@ def check_queue_match():
                     year=player_data["year"],
                     bet_amount=player_data["bet_amount"],
                     hand=[],
-                    last_drawn_index=None
+                    last_drawn_index=None,
+                    character=player_data.get("character", None) # 🔥 [FIX] 캐릭터 정보 반영
                 )
                 
                 # ▼▼▼ [중요] 강제 입장 시도 (예외 처리) ▼▼▼
@@ -271,6 +293,7 @@ def on_create_room(data):
         hand=[],
         last_drawn_index=None,
         bet_amount=0,  # 👈 커스텀 방이므로 베팅 금액은 0
+        character=data.get("character", None) # 🔥 [FIX] 캐릭터 정보 반영
     )
     gs.players.append(host_player)
     print(f"DEBUG: Host player added. Players: {len(gs.players)}")
@@ -458,6 +481,7 @@ def on_enter_room(data):
         hand=[],
         last_drawn_index=None,
         bet_amount=data.get("betAmount", 0),  # 🔥 [FIX] 커스텀 게임은 기본값 0 (큐 매칭은 check_queue_match에서 설정됨)
+        character=data.get("character", None) # 🔥 [FIX] 캐릭터 정보 반영
     )
     gs.players.append(new_player)
     join_room(room_id, sid=request.sid)
@@ -485,18 +509,45 @@ def on_leave_room(data):
         return # 방에 없는 유저
 
     # [수정] 명시적인 game_started 플래그 사용
-    game_started = gs.game_started
+    # 🔥 [FIX] Handle Room object
+    room = gs # gs is actually a Room object
+    game_state = room.game_state
+    
+    game_started = False
+    if room.game_type == 'omok':
+        if game_state and getattr(game_state, 'phase', 'INIT') != 'INIT':
+            game_started = True
+    else:
+        # Davinci
+        if game_state and hasattr(game_state, 'game_started'):
+            game_started = game_state.game_started
+
     player_was_on_turn = False
     
     # [중요] 플레이어가 방을 나가기 *전에* 현재 턴이었는지 확인
-    if game_started and gs.players and len(gs.players) > 0:
-        if gs.players[gs.current_turn].uid == player_to_remove.uid:
+    # [중요] 플레이어가 방을 나가기 *전에* 현재 턴이었는지 확인
+    if game_started:
+        is_turn = False
+        if room.game_type == 'omok':
+            if game_state and game_state.players:
+                current_idx = getattr(game_state, 'current_turn_index', 0)
+                if current_idx < len(game_state.players):
+                    if game_state.players[current_idx].uid == player_to_remove.uid:
+                        is_turn = True
+        else:
+            # Davinci
+            if game_state and game_state.players and hasattr(game_state, 'current_turn'):
+                if game_state.current_turn < len(game_state.players):
+                    if game_state.players[game_state.current_turn].uid == player_to_remove.uid:
+                        is_turn = True
+
+        if is_turn:
             player_was_on_turn = True
             
             # [중요] 현재 턴 플레이어가 나갔으므로, 타이머 즉시 중지
-            if gs.turn_timer:
-                gs.turn_timer.cancel()
-                gs.turn_timer = None
+            if game_state and hasattr(game_state, 'turn_timer') and game_state.turn_timer:
+                game_state.turn_timer.cancel()
+                game_state.turn_timer = None
                 print(f"[{room_id}] 턴 타이머 중지 (플레이어 퇴장).")
             
     # --- 플레이어 제거 ---

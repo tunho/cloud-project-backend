@@ -34,10 +34,24 @@ TURN_TIMER_SECONDS = 60
 
 # --- 헬퍼: 턴 관리 ---
 
-def get_current_player(gs: GameState) -> Optional[Player]:
-    if not gs.players:
+def get_current_player(gs) -> Optional[Player]:
+    # gs can be Room or GameState/OmokLogic
+    players = getattr(gs, 'players', [])
+    if not players:
         return None
-    return gs.players[gs.current_turn % len(gs.players)]
+        
+    # Check if gs is Room and has game_state
+    game_state = getattr(gs, 'game_state', gs)
+    
+    # Try to get current turn index
+    if hasattr(game_state, 'current_turn_index'): # OmokLogic
+        idx = game_state.current_turn_index
+    elif hasattr(game_state, 'current_turn'): # GameLogic
+        idx = game_state.current_turn
+    else:
+        return None
+        
+    return players[idx % len(players)]
 
 def start_game_flow(room_id: str):
     """(백그라운드) 게임 시작 로직: 타일 준비 -> 패 분배 -> 시작 신호 -> 첫 턴"""
@@ -96,6 +110,13 @@ def start_omok_turn(room_id: str):
         "currentTurnUid": current_player.uid,
         "timer": 30 # 오목 턴 시간
     }, room=room_id)
+
+    # 🔥 [FIX] Start server-side timer
+    if omok_logic.turn_timer:
+        omok_logic.turn_timer.cancel()
+    
+    omok_logic.turn_timer = Timer(30, handle_timeout, [room_id, current_player.uid, omok_logic.phase])
+    omok_logic.turn_timer.start()
 
 
 def start_next_turn(room_id: str, reason: str = None):
@@ -281,7 +302,7 @@ def eliminate_player(room_id: str, player: Player, reason: str = "eliminated"):
             winner.final_rank = 1
             print(f"🏆 [DEBUG] Winner {winner.nickname} assigned rank 1")
         
-        handle_winnings(room_id)
+        payout_results = handle_winnings(room_id)
         
         winner = next((p for p in gs.players if p.final_rank == 1), None)
         
@@ -293,7 +314,8 @@ def eliminate_player(room_id: str, player: Player, reason: str = "eliminated"):
             broadcast_in_game_state(room_id)
 
         socketio.emit("game_over", {
-            "winner": {"name": winner.nickname if winner else "Unknown"}
+            "winner": {"name": winner.nickname if winner else "Unknown"},
+            "payouts": payout_results
         }, room=room_id)
         return True # 게임 종료됨
     
@@ -312,8 +334,11 @@ def handle_timeout(room_id: str, player_uid: str, expected_phase: TurnPhase):
 
     player = get_current_player(gs)
 
-    if not player or player.uid != player_uid or gs.turn_phase != expected_phase:
-        print(f"타임아웃 무시: (uid: {player_uid}, phase: {expected_phase})")
+    # 🔥 [FIX] Support both turn_phase (Davinci) and phase (Omok)
+    current_phase = getattr(gs, 'turn_phase', getattr(gs, 'phase', None))
+
+    if not player or player.uid != player_uid or current_phase != expected_phase:
+        print(f"타임아웃 무시: (uid: {player_uid}, phase: {expected_phase}, current: {current_phase})")
         return
 
     print(f"⏰ 타임아웃 발생! {player.nickname} 님을 탈락 처리합니다.")
@@ -375,19 +400,17 @@ def handle_winnings(room_id: str):
         rank = player.final_rank
         
         # 이미 정산된 플레이어(중도 퇴장 등)도 결과 리스트에는 포함해야 함
+            # 이미 정산된 플레이어(중도 퇴장 등)도 결과 리스트에는 포함해야 함
         if player.settled:
             # 이미 정산되었으므로 money 업데이트는 건너뛰고 결과만 추가
-            # net_change는 역산하거나 0으로 표시 (여기서는 0으로 표시하되, 최종 금액은 반영됨)
-            # 정확한 net_change를 알기 위해선 별도 저장이 필요하지만, 
-            # 일단 현재 로직상 1등 아니면 -bet 이었을 것임.
             if rank == 1:
-                net_change = +(bet * 3)
+                net_change = +(bet) # 🔥 [FIX] 2배 -> 1배 (Profit)
             else:
                 net_change = -bet
         else:
             # 정산 안 된 플레이어 (끝까지 남은 사람들)
             if rank == 1:
-                net_change = +(bet * 3) # 🔥 1등은 베팅 금액의 3배 획득
+                net_change = +(bet * 3) # 🔥 [FIX] 1배 -> 3배 (Profit)
             else:
                 net_change = -bet # 🔥 나머지는 베팅 금액 차감 (패배)
             
@@ -399,7 +422,6 @@ def handle_winnings(room_id: str):
             if FIREBASE_AVAILABLE:
                 update_user_money_async(player.uid, net_change, player.nickname)
 
-        # 4. 프론트엔드/DB 업데이트를 위한 결과 저장 (모든 플레이어 포함)
         payout_results.append({
             "uid": player.uid,
             "nickname": player.nickname,
@@ -409,15 +431,18 @@ def handle_winnings(room_id: str):
             "new_total": player.money
         })
 
+    print(f"💸 정산 결과 ({room_id}): {payout_results}")
+    
     # 5. 모든 클라이언트에게 정산 결과 브로드캐스트
     if payout_results:
         gs.payout_results = payout_results # 🔥 [NEW] 결과 저장 (재접속 시 전송용)
-        print(f"💸 정산 결과 ({room_id}): {payout_results}")
         socketio.emit("game:payout_result", payout_results, room=room_id)
     else:
         print(f"⚠️ 정산 결과 없음 ({room_id}) - 이미 처리됨?")
     
     print(f"[{room_id}] 게임 정산 완료. 순위별 정산 처리됨.")
+    
+    return payout_results
 
     # 🔥 [추가] 방 삭제 (리소스 정리)
     # 클라이언트가 결과를 볼 시간을 주기 위해 타이머로 삭제하거나,
@@ -780,14 +805,9 @@ def on_leave_game(data):
                 is_omok = getattr(gs, 'game_type', 'davinci') == 'omok'
                 should_pass_turn = False
                 
-                if is_omok:
-                    omok_logic = gs.game_state
-                    if omok_logic and omok_logic.players:
-                         if omok_logic.current_turn_index < len(omok_logic.players):
-                             current_player = omok_logic.players[omok_logic.current_turn_index]
-                             if current_player.sid == player.sid:
-                                 should_pass_turn = True
-                else:
+                # Omok is 2-player, so game_ended should be True if one leaves.
+                # This block is mainly for Davinci (>2 players)
+                if not is_omok:
                     if game_state and hasattr(game_state, 'current_turn') and game_state.players:
                         if game_state.current_turn < len(game_state.players):
                             if game_state.players[game_state.current_turn].sid == player.sid:
@@ -798,17 +818,8 @@ def on_leave_game(data):
                     if game_state and hasattr(game_state, 'turn_timer') and game_state.turn_timer:
                         game_state.turn_timer.cancel()
                     
-                    if is_omok:
-                         # Switch turn index (0->1, 1->0)
-                        omok_logic.current_turn_index = 1 - omok_logic.current_turn_index
-                        from game_events import start_omok_turn
-                        try:
-                            start_omok_turn(room_id)
-                        except Exception as e:
-                            print(f"❌ start_omok_turn failed: {e}")
-                    else:
-                        from game_events import start_next_turn
-                        start_next_turn(room_id)
+                    from game_events import start_next_turn
+                    start_next_turn(room_id)
 
         # 2. 플레이어 제거 (게임 중이 아닐 때만!)
         if not game_started:
@@ -867,19 +878,18 @@ def on_omok_place_stone(data):
             print(f"🏆 [Omok] Game Over! Winner: {winner.nickname}")
             
             # 정산 처리
-            handle_winnings(room_id) # OmokLogic already updated money/pot, but handle_winnings does DB sync/broadcast
-            # Note: handle_winnings logic in game_events might be tailored for Davinci.
-            # Let's check handle_winnings. If it relies on final_rank, we need to set it.
-            
             # Set ranks for handle_winnings
             winner.final_rank = 1
             loser = next(p for p in gs.players if p != winner)
             loser.final_rank = 2
             
-            handle_winnings(room_id)
+            payout_results = handle_winnings(room_id)
             
+            print(f"🏆 [OMOK] Emitting game_over with winningLine: {omok_logic.winning_line}")
             socketio.emit("game_over", {
-                "winner": {"name": winner.nickname}
+                "winner": {"name": winner.nickname, "uid": winner.uid}, 
+                "payouts": payout_results,
+                "winningLine": omok_logic.winning_line # Send winning line
             }, room=room_id)
             
         else:

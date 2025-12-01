@@ -192,6 +192,9 @@ class GameLogic(GameState):
             can_place_anywhere=False,
             next_tile_id=0
         )
+        self.turn_timer = None
+        self.game_started = False
+        self.payout_results = None # 🔥 [FIX] Store payout results
         # Initialize game
         prepare_tiles(self)
         deal_initial_hands(self)

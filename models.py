@@ -71,7 +71,9 @@ class Player:
     year: int = 0
     bet_amount: int = 10000 # 🔥 [FIX] 기본값 10000
     final_rank: int = 0
+    final_rank: int = 0
     settled: bool = False  # 👈 정산 완료 여부
+    character: Dict[str, Any] = field(default_factory=dict) # 🔥 [NEW] 캐릭터 정보 저장
     
 
 @dataclass

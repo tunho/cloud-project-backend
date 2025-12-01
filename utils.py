@@ -51,6 +51,7 @@ def serialize_player(p: Player, is_self: bool = False) -> Dict[str, Any]:
         "rank": p.final_rank, # 🔥 [NEW] 순위 정보 전송
         "hand": [serialize_tile(t, is_self) for t in p.hand],
         "lastDrawnIndex": p.last_drawn_index,
+        "character": getattr(p, 'character', None) # 🔥 [FIX] 캐릭터 정보 전송
     }
 
 # (신규) 이 함수는 이제 '로비'에서만 사용합니다.
@@ -126,7 +127,7 @@ def broadcast_in_game_state(room_id: str):
     if not room: return
     
     # 🔥 [FIX] Handle Room object
-    gs = room.game_state
+    gs = room.game_state if hasattr(room, 'game_state') else room
     if not gs: return
 
     # If Omok, handle separately
