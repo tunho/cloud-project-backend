@@ -8,9 +8,14 @@ from extensions import socketio
 from game_logic import GameLogic
 from omok_logic import OmokLogic
 from omok_logic import OmokLogic
+from omok_logic import OmokLogic
 from models import Player, Color, TurnPhase, Optional, GameState # 👈 GameState 추가
 from state import rooms # 👈 rooms 임포트
 from utils import find_player_by_sid, find_player_by_uid, get_room, broadcast_in_game_state, serialize_state_for_lobby, update_user_money_async
+from handlers.omok_handler import OmokHandler
+from handlers.davinci_handler import DavinciHandler
+from handlers.indian_poker_handler import IndianPokerHandler
+from indian_poker_logic import IndianPokerLogic
 
 from game_logic import (
     prepare_tiles, deal_initial_hands, start_turn_from, 
@@ -68,6 +73,10 @@ def start_game_flow(room_id: str):
         # 오목 초기화
         if gs.game_state is None:
             gs.game_state = OmokLogic(gs.players)
+    elif gs.game_type == 'indian_poker':
+        if gs.game_state is None:
+            gs.game_state = IndianPokerLogic(gs.players)
+        gs.game_state.game_started = True # 🔥 [FIX] Mark game as started
     else:
         # 다빈치 초기화
         if gs.game_state is None:
@@ -86,11 +95,15 @@ def start_game_flow(room_id: str):
     print(f"📡 game_started 이벤트 전송 완료 -> 프론트엔드 씬 전환 대기")
 
     # 5. 프론트엔드 로딩 대기 (Vue 컴포넌트가 마운트되고 소켓 리스너를 켤 시간 확보)
-    socketio.sleep(1)
+    socketio.sleep(3) # 🔥 [FIX] Increased delay for Game Start animation
 
     # 6. 첫 번째 턴 시작
     if gs.game_type == 'omok':
-        start_omok_turn(room_id)
+        handler = OmokHandler()
+        handler.start_turn(room_id, gs)
+    elif gs.game_type == 'indian_poker':
+        handler = IndianPokerHandler()
+        handler.start_turn(room_id, gs)
     else:
         gs.game_state.current_turn = -1
         start_next_turn(room_id)
@@ -101,22 +114,11 @@ def start_omok_turn(room_id: str):
     gs = get_room(room_id)
     if not gs or not gs.game_state: return
     
-    omok_logic = gs.game_state
-    current_player = omok_logic.players[omok_logic.current_turn_index]
-    
-    print(f"--- [Omok] {current_player.nickname} 님의 턴 시작 ---")
-    
-    socketio.emit("omok:turn_start", {
-        "currentTurnUid": current_player.uid,
-        "timer": 30 # 오목 턴 시간
-    }, room=room_id)
+    handler = OmokHandler()
+    handler.start_turn(room_id, gs)
 
-    # 🔥 [FIX] Start server-side timer
-    if omok_logic.turn_timer:
-        omok_logic.turn_timer.cancel()
-    
-    omok_logic.turn_timer = Timer(30, handle_timeout, [room_id, current_player.uid, omok_logic.phase])
-    omok_logic.turn_timer.start()
+
+
 
 
 def start_next_turn(room_id: str, reason: str = None):
@@ -312,6 +314,8 @@ def eliminate_player(room_id: str, player: Player, reason: str = "eliminated"):
             gs.game_state.winner = winner
             # Broadcast state so OmokView sees phase change
             broadcast_in_game_state(room_id)
+        
+
 
         socketio.emit("game_over", {
             "winner": {"name": winner.nickname if winner else "Unknown"},
@@ -335,7 +339,7 @@ def handle_timeout(room_id: str, player_uid: str, expected_phase: TurnPhase):
     player = get_current_player(gs)
 
     # 🔥 [FIX] Support both turn_phase (Davinci) and phase (Omok)
-    current_phase = getattr(gs, 'turn_phase', getattr(gs, 'phase', None))
+    current_phase = getattr(gs, 'turn_phase', getattr(gs, 'phase', 'PLAYING'))
 
     if not player or player.uid != player_uid or current_phase != expected_phase:
         print(f"타임아웃 무시: (uid: {player_uid}, phase: {expected_phase}, current: {current_phase})")
@@ -410,7 +414,11 @@ def handle_winnings(room_id: str):
         else:
             # 정산 안 된 플레이어 (끝까지 남은 사람들)
             if rank == 1:
-                net_change = +(bet * 3) # 🔥 [FIX] 1배 -> 3배 (Profit)
+                # 🔥 [FIX] Game Type based multiplier
+                g_type = getattr(room, 'game_type', 'davinci')
+                multiplier = 1 if str(g_type).lower() in ['omok', 'indian_poker'] else 3
+                print(f"💰 [Payout] RoomType: {type(room)}, GameType: {g_type} (str: {str(g_type).lower()}), Multiplier: {multiplier}")
+                net_change = +(bet * multiplier) # 🔥 나머지는 베팅 금액 차감 (패배)
             else:
                 net_change = -bet # 🔥 나머지는 베팅 금액 차감 (패배)
             
@@ -459,292 +467,115 @@ def handle_winnings(room_id: str):
 def on_draw_tile(data):
     """플레이어가 덱에서 카드를 뽑을 때"""
     room_id = data.get("roomId")
-    color = data.get("color")  # "black" or "white"
-    
-    room = get_room(room_id)
-    if not room: return
-    gs = room.game_state
-    if not gs: return
-    
-    player = find_player_by_sid(gs, request.sid)
-    
-    if not player:
-        return
-    
-    if gs.turn_phase != "DRAWING":
-        return
-    
-    if gs.players[gs.current_turn].sid != player.sid:
-        return
-    
-    # 타일 뽑기 로직 실행
-    tile = start_turn_from(gs, player, color)
-    
-    if not tile:
-        return
-    
-    # 조커인 경우 배치 페이즈로, 아니면 자동 배치
-    if tile.is_joker:
-        set_turn_phase(room_id, "PLACE_JOKER")
-    else:
-        auto_place_drawn_tile(gs, player)
-        set_turn_phase(room_id, "GUESSING")
+    handler = DavinciHandler()
+    handler.handle_action(room_id, "draw_tile", data, request.sid)
 
 @socketio.on("place_joker")
 def on_place_joker(data):
     """플레이어가 조커를 배치할 위치를 선택했을 때"""
     room_id = data.get("roomId")
-    index = data.get("index")
-    
-    room = get_room(room_id)
-    if not room: return
-    gs = room.game_state
-    if not gs: return
-
-    player = find_player_by_sid(gs, request.sid)
-    
-    if not player:
-        return
-    
-    if gs.turn_phase != "PLACE_JOKER":
-        return
-    
-    if gs.players[gs.current_turn].sid != player.sid:
-        return
-    
-    # 조커 배치
-    if gs.drawn_tile and gs.drawn_tile.is_joker:
-        player.hand.insert(index, gs.drawn_tile)
-        player.last_drawn_index = index
-        gs.drawn_tile = None
-        gs.pending_placement = False
-        gs.can_place_anywhere = False
-        
-        # 추리 페이즈로 전환
-        set_turn_phase(room_id, "GUESSING")
+    handler = DavinciHandler()
+    handler.handle_action(room_id, "place_joker", data, request.sid)
 
 @socketio.on("guess_value")
 def on_guess_value(data):
     """플레이어가 추리를 시도할 때"""
     room_id = data.get("roomId")
-    target_id = data.get("targetId")
-    index = data.get("index")
-    value = data.get("value")
-    
-    room = get_room(room_id)
-    if not room: return
-    gs = room.game_state
-    if not gs: return
-
-    guesser = find_player_by_sid(gs, request.sid)
-    
-    if not guesser:
-        return
-    
-    if gs.turn_phase not in ["GUESSING", "POST_SUCCESS_GUESS"]:
-        return
-    
-    if gs.players[gs.current_turn].sid != guesser.sid:
-        return
-    
-    # 추리 로직 실행
-    result = guess_tile(gs, guesser, target_id, index, value)
-    
-    if not result.get("ok"):
-        return
-    
-    # 애니메이션 페이즈로 전환
-    set_turn_phase(room_id, "ANIMATING_GUESS", broadcast=False)
-    
-    # 🔥 [FIXED] 추리 시작 이벤트 브로드캐스트 (애니메이션 트리거)
-    # 프론트엔드는 "game:start_guess_animation"을 listen하고 있음
-    socketio.emit("game:start_guess_animation", {
-        "guesser_id": guesser.uid,
-        "target_id": target_id,
-        "index": index,
-        "value": value,
-        "correct": result.get("correct")
-    }, room=room_id)
+    handler = DavinciHandler()
+    handler.handle_action(room_id, "guess_value", data, request.sid)
 
 @socketio.on("stop_guessing")
 def on_stop_guessing(data):
     """플레이어가 연속 추리를 멈추고 턴을 넘길 때 호출됨"""
     room_id = data.get("roomId")
-    room = get_room(room_id)
-    if not room: return
-    gs = room.game_state
-    if not gs:
-        return
-    
-    player = find_player_by_sid(gs, request.sid)
-    if not player:
-        return
-    
-    # 현재 턴인지 확인
-    if gs.players[gs.current_turn].sid != player.sid:
-        return
-    
-    print(f"[{room_id}] {player.nickname} 턴 패스")
-    
-    # 다음 턴으로 넘김
-    start_next_turn(room_id)
+    handler = DavinciHandler()
+    handler.handle_action(room_id, "stop_guessing", data, request.sid)
 @socketio.on("game:animation_done")
 def on_animation_done(data):
     """클라이언트가 추리 결과 애니메이션을 완료했을 때 호출됨"""
     room_id = data.get("roomId")
-    guesser_uid = data.get("guesserUid") 
-    correct = data.get("correct") 
-
-    if not room_id or not guesser_uid: return
-    
-    room = get_room(room_id)
-    if not room: return
-    gs = room.game_state
-    if not gs: return
-    player = find_player_by_uid(gs, guesser_uid)
-    
-    # 검증: 현재 턴 플레이어만 이 신호를 보낼 수 있게 함 (중복 처리 방지)
-    if not player or gs.players[gs.current_turn].uid != player.uid:
-        return 
-
-    if gs.turn_phase != "ANIMATING_GUESS":
-        # 이미 처리되었거나 페이즈가 안 맞으면 무시
-        return
-    
-    # 🔥 [FIX] Race Condition 방지: 즉시 페이즈를 변경하여 중복 실행 막음
-    gs.turn_phase = "PROCESSING"
-
-    print(f"[{room_id}] {player.nickname} 애니메이션 완료. 결과: {correct}")
-
-    # 1. 탈락자 처리 및 순위 산정
-    # 🔥 [FIX] Count UNRANKED players (final_rank == 0), not just alive players!
-    # This ensures correct ranking: 4 players → 1st eliminated gets 4th place
-    unranked_players = [p for p in gs.players if p.final_rank == 0]
-    unranked_count = len(unranked_players)
-    print(f"🔍 [DEBUG] Initial unranked_count: {unranked_count}, unranked: {[p.nickname for p in unranked_players]}")
-    
-    # 방금 탈락한 플레이어 찾기 (final_rank가 0인데 eliminated 상태인 경우)
-    for p in gs.players:
-        if p.final_rank == 0 and is_player_eliminated(p):
-            # 🔥 [FIX] Use unranked_count (same fix as on_animation_done)
-            # Count players who haven't been ranked yet
-            # 🔥 [REFACTOR] Use eliminate_player logic here too?
-            # For now, keep inline to avoid breaking animation flow, but logic is identical
-            p.final_rank = unranked_count
-            print(f"🔥 [DEBUG] Assigning rank {unranked_count} to {p.nickname} (was eliminated)")
-            unranked_count -= 1
-
-            # Reveal all cards of eliminated player
-            for tile in p.hand:
-                tile.revealed = True
-            print(f"🃏 [Elimination] All cards revealed for {p.nickname}")
-
-            print(f"💀 플레이어 탈락: {p.nickname} (Rank: {p.final_rank})")
-            socketio.emit("game:player_eliminated", {
-                "uid": p.uid,
-                "nickname": p.nickname,
-                "rank": p.final_rank
-            }, room=room_id)
-
-            # Broadcast updated state so client knows player is eliminated before settlement
-            broadcast_in_game_state(room_id)
-
-            # 🔥 [NEW] 즉시 패배 정산 (돈 차감)
-            if not p.settled:
-                net_change = -p.bet_amount
-                p.money += net_change
-                p.settled = True
-
-                print(f"💰 [Settlement] Player {p.nickname} eliminated. Bet: {p.bet_amount}, Net: {net_change}") # 🔥 [LOG]
-                
-                # 정산 결과 저장 및 전송
-                payout_data = {
-                    "uid": p.uid,
-                    "nickname": p.nickname,
-                    "rank": p.final_rank,
-                    "bet": p.bet_amount,
-                    "net_change": net_change,
-                    "new_total": p.money
-                }
-                if gs.payout_results is None: gs.payout_results = []
-                gs.payout_results.append(payout_data)
-
-                socketio.emit("game:payout_result", [payout_data], room=room_id)
-
-                # Firestore 업데이트 (패배 패널티 - 비동기)
-                if FIREBASE_AVAILABLE:
-                    update_user_money_async(p.uid, net_change, p.nickname)
-
-            # Broadcast again after payout result to ensure UI sync
-            broadcast_in_game_state(room_id)
- # 🔥 [NEW] 상태 브로드캐스트 (카드 공개 및 탈락 반영)
-
-    # 🔥 [FIX] 게임 종료 체크 전에 반드시 상태 업데이트를 먼저 보냄
-    # 그래야 마지막 카드가 뒤집힌 상태(eliminated)가 프론트엔드에 반영됨
-    broadcast_in_game_state(room_id)
-
-    # Slight delay before checking game end to allow UI to process state update
-    socketio.sleep(0.3)
-
-    # 2. 게임 종료 조건 확인 (순위 없는 플레이어가 1명 이하일 때)
-    # 🔥 [FIX] Check unranked_count, not alive_count!
-    print(f"🔍 [DEBUG] Checking game end: unranked_count={unranked_count}")
-    if unranked_count <= 1:
-        print(f"🏆 게임 종료! 순위 없는 플레이어 {unranked_count}명")
-        
-        # 🔥 [FIX] 마지막 순위 없는 플레이어에게 1등 부여
-        if unranked_count == 1:
-            # Find the remaining unranked player
-            remaining_unranked = [p for p in gs.players if p.final_rank == 0]
-            if remaining_unranked:
-                winner = remaining_unranked[0]
-                winner.final_rank = 1
-                print(f"🏆 [DEBUG] Winner {winner.nickname} assigned rank 1")
-        
-        # 정산 및 종료 처리
-        handle_winnings(room_id)
-
-        # Ensure UI receives final state before game_over
-        broadcast_in_game_state(room_id)
-        socketio.sleep(0.5)
-
-        # 게임 종료 이벤트 전송 (handle_winnings에서 payout_result를 보내지만, 명시적 game_over도 보냄)
-        winner = next((p for p in gs.players if p.final_rank == 1), None)
-        print(f"🏆 Sending game_over for {room_id}. Winner: {winner.nickname if winner else 'Unknown'}")
-        socketio.emit("game_over", {
-            "winner": {"name": winner.nickname if winner else "Unknown"}
-        }, room=room_id)
-        
-        # 방 정리 (약간의 딜레이 후)
-        # socketio.sleep(10) 
-        # del rooms[room_id] # 바로 삭제하면 클라이언트가 결과를 못 봄. 나중에 처리하거나 클라이언트가 나가도록 유도.
-        return
-
-    # 3. 상태 업데이트 전송
-    broadcast_in_game_state(room_id)
-
-    # 4. 결과에 따른 턴 진행 분기
-    if correct:
-        # 정답 -> 연속 추리 기회 (단, 내가 탈락했으면 턴 넘김 - 희박하지만 자폭룰이 있다면)
-        if is_player_eliminated(player):
-             start_next_turn(room_id)
-        else:
-            set_turn_phase(room_id, "POST_SUCCESS_GUESS")
-            # 🔥 [FIX] 연속 추리 시 타이머 리셋 (서버 기준 시간 갱신)
-            gs.turn_start_time = time.time()
-            
-            socketio.emit("game:prompt_continue", 
-                          {"timer": TURN_TIMER_SECONDS}, 
-                          to=player.sid)
-    else:
-        # 오답 -> 턴 종료 및 다음 사람
-        start_next_turn(room_id)
+    handler = DavinciHandler()
+    handler.handle_action(room_id, "animation_done", data, request.sid)
 
 @socketio.on("request_game_state")
 def on_request_game_state(data):
     """(신규) 프론트엔드가 게임 페이지 로드 직후 호출하는 함수"""
     room_id = data.get("roomId")
-    if not room_id: return
+    uid = data.get('uid')
+    print(f"🔍 [Debug] request_game_state called. Room: {room_id}, UID: {uid}, SID: {request.sid}")
+    
+    # 🔥 Direct Echo Test
+    socketio.emit('debug_echo', {'message': 'Hello from Backend', 'sid': request.sid}, room=request.sid)
+
+    if not room_id: 
+        print("❌ [Debug] No room_id provided")
+        return
+
+    gs = get_room(room_id)
+    
+    # 🔥 [Resurrection] If room missing but players provided, recreate it
+    if not gs and data.get('players'):
+        print(f"🧟 [Resurrection] Room {room_id} missing. Recreating from frontend data...")
+        from models import Room, Player
+        from utils import rooms
+        
+        new_room = Room(room_id=room_id)
+        new_room.game_type = 'indian_poker' # Assume Indian Poker for now
+        
+        recreated_players = []
+        for p_data in data['players']:
+            # Create player with minimal required fields
+            p = Player(
+                sid=request.sid if p_data.get('uid') == uid else 'offline', # Assign current SID to me, others offline
+                uid=p_data.get('uid'),
+                nickname=p_data.get('nickname', 'Unknown')
+            )
+            p.character = p_data.get('character')
+            p.money = p_data.get('money', 100)
+            recreated_players.append(p)
+            
+        new_room.players = recreated_players
+        rooms[room_id] = new_room
+        gs = new_room
+        print(f"✅ [Resurrection] Room {room_id} restored with {len(gs.players)} players.")
+
+    if not gs: 
+        print(f"❌ [Debug] Room {room_id} not found in get_room()")
+        return
+
+    print(f"✅ [Debug] Room found. GameType: {getattr(gs, 'game_type', 'davinci')}, Players: {len(gs.players)}")
+
+    # 🔥 [FIX] Self-healing logic for Indian Poker
+    if getattr(gs, 'game_type', 'davinci') == 'indian_poker':
+        # 🔥 [NEW] Sync SID if UID provided (Fixes reconnection/refresh issues)
+        if uid:
+            for p in gs.players:
+                if p.uid == uid:
+                    if p.sid != request.sid:
+                        print(f"🔄 [Sync] Updating SID for {p.nickname}: {p.sid} -> {request.sid}")
+                        p.sid = request.sid
+                    else:
+                        print(f"✅ [Sync] SID matches for {p.nickname}")
+                    break
+        else:
+            print("⚠️ [Debug] No UID provided for SID sync")
+
+        if gs.game_state is None:
+            print(f"🔧 [Self-Healing] {room_id} IndianPokerLogic missing. Initializing...")
+            gs.game_state = IndianPokerLogic(gs.players)
+            gs.game_state.game_started = True
+        else:
+            print(f"✅ [Debug] GameState exists. Round: {gs.game_state.current_round}")
+        
+        if gs.game_state.current_round == 0:
+            print(f"🔧 [Self-Healing] {room_id} Round 0 detected. Forcing start_round()...")
+            gs.game_state.start_round()
+            
+        # Use handler to send specific state
+        print(f"🚀 [Debug] Calling IndianPokerHandler.start_turn for Room {room_id}")
+        IndianPokerHandler().start_turn(room_id, gs)
+        print(f"[{room_id}] Indian Poker state synced (Self-Healed)")
+        return
 
     # 현재 게임 상태 전체를 브로드캐스트 (혹은 요청자에게만 전송)
     # broadcast_in_game_state 함수가 이미 구현되어 있으므로 활용
@@ -780,6 +611,8 @@ def on_leave_game(data):
         if getattr(gs, 'game_type', 'davinci') == 'omok':
              if game_state and getattr(game_state, 'phase', 'INIT') != 'INIT':
                  game_started = True
+        elif getattr(gs, 'game_type', 'davinci') == 'indian_poker':
+             game_started = True
         else:
             # Davinci
             if game_state:
@@ -851,53 +684,21 @@ def on_leave_game(data):
 def on_omok_place_stone(data):
     """오목 돌 두기 요청"""
     room_id = data.get("roomId")
-    x = data.get("x")
-    y = data.get("y")
-    
-    gs = get_room(room_id)
-    player = find_player_by_sid(gs, request.sid)
-    
-    if not gs or not player or not gs.game_state:
-        return
-        
-    omok_logic = gs.game_state
-    
-    # 돌 두기 시도
-    success, message = omok_logic.place_stone(player.sid, x, y)
-    
-    if success:
-        # 보드 업데이트 브로드캐스트
-        socketio.emit("omok:update_board", {
-            "board": omok_logic.board,
-            "lastMove": {"x": x, "y": y, "color": omok_logic.board[y][x]}
-        }, room=room_id)
-        
-        # 게임 종료 체크
-        if omok_logic.phase == 'GAME_OVER':
-            winner = omok_logic.winner
-            print(f"🏆 [Omok] Game Over! Winner: {winner.nickname}")
-            
-            # 정산 처리
-            # Set ranks for handle_winnings
-            winner.final_rank = 1
-            loser = next(p for p in gs.players if p != winner)
-            loser.final_rank = 2
-            
-            payout_results = handle_winnings(room_id)
-            
-            print(f"🏆 [OMOK] Emitting game_over with winningLine: {omok_logic.winning_line}")
-            socketio.emit("game_over", {
-                "winner": {"name": winner.nickname, "uid": winner.uid}, 
-                "payouts": payout_results,
-                "winningLine": omok_logic.winning_line # Send winning line
-            }, room=room_id)
-            
-        else:
-            # 다음 턴 진행
-            start_omok_turn(room_id)
-            
-    else:
-        # 에러 전송
-        emit("error_message", {"message": message})
-        import traceback
-        traceback.print_exc()
+    handler = OmokHandler()
+    handler.handle_action(room_id, "place_stone", data, request.sid)
+
+@socketio.on("indian_poker:bet")
+def on_indian_poker_bet(data):
+    room_id = data.get("roomId")
+    handler = IndianPokerHandler()
+    handler.handle_action(room_id, "bet", data, request.sid)
+
+@socketio.on("indian_poker:next_round")
+def on_indian_poker_next_round(data):
+    room_id = data.get("roomId")
+    handler = IndianPokerHandler()
+    handler.handle_action(room_id, "next_round", data, request.sid)
+
+
+
+

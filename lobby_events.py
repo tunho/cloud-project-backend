@@ -8,12 +8,13 @@ from extensions import socketio, get_db, FIREBASE_AVAILABLE # 🔥 [FIX] Import 
 # 🔥 [MODIFIED] Split queue into game types
 queues = {
     'davinci': [],
-    'omok': []
+    'omok': [],
+    'indian_poker': []
 }
 from state import rooms # queue is now local
 # ▼▼▼ (수정) find_player_by_uid 임포트 ▼▼▼
 from utils import (
-    get_room, find_player_by_sid, find_player_by_uid, 
+    get_room, serialize_player, find_player_by_sid, find_player_by_uid, 
     broadcast_in_game_state, serialize_state_for_lobby
 )
 from models import Player, GameState, Optional, Room # 👈 Room 추가
@@ -30,6 +31,7 @@ def broadcast_queue_status():
         print(f"Broadcasting {game_type} queue status: {count} players")
         
         for p in queue:
+            print(f"📡 Sending queue_status to {p['nickname']} ({p['sid']}) for {game_type}: {count}/{max_players}")
             emit("queue_status", 
                  {"status": "waiting", "count": count, "max": max_players, "gameType": game_type}, 
                  to=p["sid"])
@@ -39,11 +41,15 @@ def on_join_queue(data):
     global queues
     sid = request.sid
     bet_amount = int(data.get("betAmount", 10000))
-    game_type = data.get("gameType", "davinci") # Default to davinci
+    game_type = data.get("gameType", "davinci").lower() # Default to davinci
+    
+    print(f"🔍 [DEBUG] on_join_queue received data: {data}") # 🔥 [DEBUG] Check betAmount
     
     if game_type not in queues:
+        print(f"⚠️ Invalid game_type '{game_type}' requested. Defaulting to 'davinci'.")
         game_type = 'davinci'
         
+    print(f"🔍 [JoinQueue] Processing join request for game_type: {game_type}")
     queue = queues[game_type]
     
     # ▼▼▼ [추가된 필드 추출] ▼▼▼
@@ -138,6 +144,7 @@ def check_queue_match():
     global queues
     
     for game_type, queue in queues.items():
+        # Davinci requires 4, others (Omok, Indian Poker) require 2
         required_players = 4 if game_type == 'davinci' else 2
         
         if len(queue) >= required_players:
@@ -147,6 +154,7 @@ def check_queue_match():
             room_id = str(uuid.uuid4())[:8]
             # 🔥 [FIX] Create Room object explicitly instead of using get_room (which creates GameState)
             new_room = Room(room_id, f"Match_{room_id}", game_type=game_type)
+            print(f"🏗️ [Match] Created Room {room_id} with GameType: {game_type}")
             rooms[room_id] = new_room
             gs = new_room
             # gs.game_type = game_type # Already set in init
@@ -202,10 +210,13 @@ def check_queue_match():
                 # GameState에 플레이어 등록
                 gs.players = players_to_match
                 
+                # Serialize players for immediate frontend use
+                serialized_players = [serialize_player(p, is_self=False) for p in players_to_match]
+
                 # 각 플레이어에게 매칭 성공 신호 전송
                 final_match_data = {
                     "roomId": room_id,
-                    "players": player_names
+                    "players": serialized_players # 🔥 Send full player objects
                 }
                 socketio.emit("match:success", final_match_data, room=room_id)
 
@@ -256,7 +267,7 @@ def on_create_room(data):
     major = data.get("major", "N/A")
     room_name = data.get('roomName')
     password = data.get('password')
-    game_type = data.get('gameType', 'davinci') # Default to davinci
+    game_type = data.get('gameType', 'davinci').lower() # Default to davinci
     money = data.get("money", 0)  # 👈 money 추출
     year = data.get("year", 0)
 
@@ -265,7 +276,25 @@ def on_create_room(data):
     if not room_name:
         return
 
+    # 🔥 [FIX] Fetch character if missing
+    character = data.get("character")
+    if not character and FIREBASE_AVAILABLE:
+        try:
+            db = get_db()
+            user_ref = db.collection("users").document(uid)
+            doc = user_ref.get()
+            if doc.exists:
+                user_data = doc.to_dict()
+                character = user_data.get("character")
+                # Optional: Update other fields
+                money = user_data.get("money", money)
+                nickname = user_data.get("nickname", nickname)
+                print(f"✅ [CreateRoom] Fetched fresh data for {nickname}")
+        except Exception as e:
+            print(f"⚠️ [CreateRoom] Failed to fetch user data: {e}")
+
     room_id = str(uuid.uuid4())[:8]
+    print(f"🏗️ [CreateRoom] Request GameType: {game_type}")
     new_room = Room(room_id, room_name, password, game_type=game_type)
     # new_room.game_type = game_type # Already set in init
     while room_id in rooms: # This loop should ideally check for new_room.id in rooms
@@ -290,10 +319,9 @@ def on_create_room(data):
         major=major,
         money=money,  # 👈 money 반영
         year=year,
-        hand=[],
         last_drawn_index=None,
         bet_amount=0,  # 👈 커스텀 방이므로 베팅 금액은 0
-        character=data.get("character", None) # 🔥 [FIX] 캐릭터 정보 반영
+        character=character # 🔥 [FIX] 캐릭터 정보 반영
     )
     gs.players.append(host_player)
     print(f"DEBUG: Host player added. Players: {len(gs.players)}")
@@ -341,6 +369,22 @@ def on_enter_room(data):
         year = 0
     if not room_id or not uid or room_id not in rooms:
         return
+
+    # 🔥 [FIX] Fetch character if missing
+    character = data.get("character")
+    if not character and FIREBASE_AVAILABLE:
+        try:
+            db = get_db()
+            user_ref = db.collection("users").document(uid)
+            doc = user_ref.get()
+            if doc.exists:
+                user_data = doc.to_dict()
+                character = user_data.get("character")
+                money = user_data.get("money", money)
+                nickname = user_data.get("nickname", nickname)
+                print(f"✅ [EnterRoom] Fetched fresh data for {nickname}")
+        except Exception as e:
+            print(f"⚠️ [EnterRoom] Failed to fetch user data: {e}")
 
     # 🔥 [FIX] Handle Room object correctly
     room = get_room(room_id)
@@ -478,10 +522,9 @@ def on_enter_room(data):
         major=major,
         money=money,  # 👈 money 반영
         year=year,
-        hand=[],
         last_drawn_index=None,
         bet_amount=data.get("betAmount", 0),  # 🔥 [FIX] 커스텀 게임은 기본값 0 (큐 매칭은 check_queue_match에서 설정됨)
-        character=data.get("character", None) # 🔥 [FIX] 캐릭터 정보 반영
+        character=character # 🔥 [FIX] 캐릭터 정보 반영
     )
     gs.players.append(new_player)
     join_room(room_id, sid=request.sid)
@@ -517,6 +560,9 @@ def on_leave_room(data):
     if room.game_type == 'omok':
         if game_state and getattr(game_state, 'phase', 'INIT') != 'INIT':
             game_started = True
+    elif room.game_type == 'indian_poker':
+        # Indian Poker starts immediately upon creation
+        game_started = True
     else:
         # Davinci
         if game_state and hasattr(game_state, 'game_started'):
@@ -524,7 +570,6 @@ def on_leave_room(data):
 
     player_was_on_turn = False
     
-    # [중요] 플레이어가 방을 나가기 *전에* 현재 턴이었는지 확인
     # [중요] 플레이어가 방을 나가기 *전에* 현재 턴이었는지 확인
     if game_started:
         is_turn = False
@@ -534,6 +579,11 @@ def on_leave_room(data):
                 if current_idx < len(game_state.players):
                     if game_state.players[current_idx].uid == player_to_remove.uid:
                         is_turn = True
+        elif room.game_type == 'indian_poker':
+             if game_state and game_state.players:
+                current_player = game_state.get_current_player()
+                if current_player and current_player.uid == player_to_remove.uid:
+                    is_turn = True
         else:
             # Davinci
             if game_state and game_state.players and hasattr(game_state, 'current_turn'):
@@ -557,12 +607,21 @@ def on_leave_room(data):
     # ---------------------
 
     # --- 후속 처리 ---
+    # --- 후속 처리 ---
     if game_started:
         if len(gs.players) == 1:
             # [승리 처리] 1명 남음
             winner = gs.players[0]
             print(f"🏆 게임 종료! 승자: {winner.name}")
-            socketio.emit("game_over", {"winner": {"id": winner.id, "name": winner.name}}, room=room_id)
+            
+            # 🔥 [FIX] 정산 실행
+            from game_events import handle_winnings
+            payout_results = handle_winnings(room_id)
+            
+            socketio.emit("game_over", {
+                "winner": {"id": winner.id, "uid": winner.uid, "name": winner.name},
+                "payouts": payout_results # 🔥 [FIX] Payouts 포함
+            }, room=room_id)
             
             # [요청 사항] 방을 삭제하지 않고 게임 종료 상태로 둡니다.
             gs.game_started = False

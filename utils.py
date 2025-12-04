@@ -148,9 +148,12 @@ def broadcast_in_game_state(room_id: str):
         return
 
     current_player_sid = None
-    if gs.drawn_tile and gs.current_turn < len(gs.players):
+    # 🔥 [FIX] Check if drawn_tile exists (Davinci specific)
+    if hasattr(gs, 'drawn_tile') and gs.drawn_tile and gs.current_turn < len(gs.players):
          # current_turn은 '인덱스'이므로 바로 사용
         current_player_sid = gs.players[gs.current_turn].sid
+    elif hasattr(gs, 'current_turn_uid'): # Indian Poker specific
+        current_player_sid = find_player_by_uid(gs, gs.current_turn_uid).sid if find_player_by_uid(gs, gs.current_turn_uid) else None
 
     for p_to_send in gs.players:
         # 이 사람(p_to_send)이 현재 턴의 플레이어인가?
@@ -163,17 +166,17 @@ def broadcast_in_game_state(room_id: str):
                 for p in gs.players
             ],
             "piles": {
-                "black": len(gs.piles["black"]),
-                "white": len(gs.piles["white"]),
+                "black": len(getattr(gs, 'piles', {}).get("black", [])),
+                "white": len(getattr(gs, 'piles', {}).get("white", [])),
             },
-            "sameNumberOrder": gs.same_number_order,
-            "currentTurn": gs.current_turn, # 인덱스
+            "sameNumberOrder": getattr(gs, 'same_number_order', 'black-first'),
+            "currentTurn": getattr(gs, 'current_turn', getattr(gs, 'current_turn_index', 0)), # 인덱스
             
             # (보안) '뽑은 타일'은 현재 턴인 사람에게만 값을 보여줌
-            "drawnTile": serialize_tile(gs.drawn_tile, is_self=is_current_turn_player),
-            "phase": gs.turn_phase, # 🔥 [FIX] Refresh 시 페이즈 정보 전송
-            "remainingTime": max(0, TURN_TIMER_SECONDS - (time.time() - gs.turn_start_time)) if gs.turn_start_time else 0, # 🔥 [NEW] 남은 시간 전송
-            "payoutResults": gs.payout_results, # 🔥 [NEW] 정산 결과 전송
+            "drawnTile": serialize_tile(gs.drawn_tile, is_self=is_current_turn_player) if hasattr(gs, 'drawn_tile') else None,
+            "phase": getattr(gs, 'turn_phase', getattr(gs, 'phase', 'Unknown')), # 🔥 [FIX] Refresh 시 페이즈 정보 전송 (Support both turn_phase and phase)
+            "remainingTime": max(0, TURN_TIMER_SECONDS - (time.time() - gs.turn_start_time)) if getattr(gs, 'turn_start_time', None) else 0, # 🔥 [NEW] 남은 시간 전송
+            "payoutResults": getattr(gs, 'payout_results', None), # 🔥 [NEW] 정산 결과 전송
         }
         
         # 'state_update' 이벤트로 개인화된 상태 전송
