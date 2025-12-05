@@ -61,12 +61,13 @@ def on_disconnect(reason=None):  # 🔥 [FIXED] Flask-SocketIO passes reason par
                      # 🔥 [FIX] Call Omok Handler
                      from handlers.omok_handler import OmokHandler
                      OmokHandler().on_disconnect(room_id, request.sid)
+                     return # 🔥 [FIX] Exit early, let handler handle it
                      
                 elif getattr(gs, 'game_type', 'davinci') == 'indian_poker':
                      # 🔥 [FIX] Call Indian Poker Handler
                      from handlers.indian_poker_handler import IndianPokerHandler
                      IndianPokerHandler().on_disconnect(room_id, request.sid)
-                     game_started = True # Indian Poker starts immediately
+                     return # 🔥 [FIX] Exit early, let handler handle it
                      
                 else:
                     # Davinci

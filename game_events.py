@@ -353,6 +353,14 @@ def handle_timeout(room_id: str, player_uid: str, expected_phase: TurnPhase):
         gs.turn_timer = None
     
     # 🔥 [FIX] 타임아웃 = 패배 처리
+    game_type = getattr(room, 'game_type', 'davinci')
+    
+    if game_type == 'omok':
+        print(f"⏰ [Omok] Timeout for {player.nickname}. Treating as leave_game (Defeat).")
+        from handlers.omok_handler import OmokHandler
+        OmokHandler().leave_game(room_id, player.sid)
+        return
+
     game_ended = eliminate_player(room_id, player, reason="timeout")
 
     if not game_ended:
@@ -607,15 +615,21 @@ def on_leave_game(data):
         has_cards = len(player.hand) > 0
         
         # Check game_started based on game type
-        game_started = False
-        if getattr(gs, 'game_type', 'davinci') == 'omok':
-             if game_state and getattr(game_state, 'phase', 'INIT') != 'INIT':
-                 game_started = True
-        elif getattr(gs, 'game_type', 'davinci') == 'indian_poker':
+        game_started = False # 🔥 [FIX] Initialize to avoid UnboundLocalError
+        game_type = getattr(gs, 'game_type', 'davinci')
+        
+        if game_type == 'omok':
+             # 🔥 [FIX] Delegate to OmokHandler for consistent exit logic
+             from handlers.omok_handler import OmokHandler
+             OmokHandler().leave_game(room_id, sid)
+             return
+
+        elif game_type == 'indian_poker':
              # 🔥 [FIX] Delegate to IndianPokerHandler for consistent exit logic
              from handlers.indian_poker_handler import IndianPokerHandler
              IndianPokerHandler().leave_game(room_id, sid)
              return
+             
         else:
             # Davinci
             if game_state:
@@ -701,6 +715,14 @@ def on_indian_poker_next_round(data):
     room_id = data.get("roomId")
     handler = IndianPokerHandler()
     handler.handle_action(room_id, "next_round", data, request.sid)
+
+@socketio.on("indian_poker:action")
+def on_indian_poker_action(data):
+    """인디언 포커 일반 액션 (surrender 등)"""
+    room_id = data.get("roomId")
+    action = data.get("action")
+    handler = IndianPokerHandler()
+    handler.handle_action(room_id, action, data, request.sid)
 
 
 

@@ -57,7 +57,38 @@ class OmokHandler(GameHandler):
             import traceback
             traceback.print_exc()
 
-    def _handle_game_over(self, room_id: str, gs, omok_logic):
+    def leave_game(self, room_id: str, sid: str):
+        """플레이어 이탈 처리"""
+        gs = get_room(room_id)
+        if not gs or not gs.game_state:
+            return
+
+        omok_logic = gs.game_state
+        player = find_player_by_sid(gs, sid)
+        
+        if not player:
+            return
+
+        print(f"🚪 [Omok] Player {player.nickname} leaving game.")
+        
+        # Determine winner (Opponent)
+        opponent = next((p for p in gs.players if p.uid != player.uid), None)
+        
+        if opponent:
+            print(f"🏆 [Omok] Opponent {opponent.nickname} wins by default.")
+            omok_logic.winner = opponent
+            omok_logic.phase = 'GAME_OVER'
+            omok_logic.winning_line = [] # No line for forfeit
+            
+            # End game immediately
+            self._handle_game_over(room_id, gs, omok_logic, reason="player_left")
+
+    def on_disconnect(self, room_id: str, sid: str):
+        """플레이어 연결 끊김 처리"""
+        print(f"🔌 [Omok] on_disconnect: {sid} in room {room_id}")
+        self.leave_game(room_id, sid)
+
+    def _handle_game_over(self, room_id: str, gs, omok_logic, reason=None):
         winner = omok_logic.winner
         print(f"🏆 [Omok] Game Over! Winner: {winner.nickname}")
         
@@ -68,9 +99,18 @@ class OmokHandler(GameHandler):
         from game_events import handle_winnings
         payout_results = handle_winnings(room_id)
         
-        print(f"🏆 [OMOK] Emitting game_over with winningLine: {omok_logic.winning_line}")
+        # 🔥 [FIX] Use serialize_player to send full winner data (including SID and Character)
+        from utils import serialize_player
+        serialized_winner = serialize_player(winner)
+        
+        # Determine reason if not provided
+        if not reason:
+             reason = "player_left" if omok_logic.phase == 'GAME_OVER' and not omok_logic.winning_line else "normal"
+
+        print(f"🏆 [OMOK] Emitting game_over with winningLine: {omok_logic.winning_line}, Reason: {reason}")
         socketio.emit("game_over", {
-            "winner": {"name": winner.nickname, "uid": winner.uid}, 
+            "winner": serialized_winner, 
             "payouts": payout_results,
-            "winningLine": omok_logic.winning_line
+            "winningLine": omok_logic.winning_line,
+            "reason": reason
         }, room=room_id)

@@ -47,9 +47,14 @@ class IndianPokerHandler(GameHandler):
             gs.turn_timer = Timer(30.0, self._handle_timeout, [room_id, gs])
             gs.turn_timer.start()
 
+        self._broadcast_state(room_id, gs)
+
+    def _broadcast_state(self, room_id: str, gs, force_hidden: bool = False):
+        logic = gs.game_state
+        current_player = logic.get_current_player()
+        
         # Broadcast state individually to show opponent's card but hide own
         for player in gs.players:
-            print(f"📤 [Handler] Preparing state for {player.nickname} (SID: {player.sid})")
             # Construct hands view for this player
             hands_view = {}
             if logic.phase == 'SHOWDOWN' and not force_hidden:
@@ -64,35 +69,29 @@ class IndianPokerHandler(GameHandler):
             # Serialize players for frontend
             serialized_players = []
             for p in gs.players:
-                # 🔥 [DEBUG] Log player data
-                print(f"👤 [IndianPoker] Serializing {p.nickname}: Bet={p.bet_amount}, Char={p.character is not None}")
-                
                 serialized_players.append({
                     "uid": p.uid,
                     "nickname": p.nickname,
-                    "character": p.character if p.character else {}, # 🔥 [FIX] Ensure dict
+                    "character": p.character if p.character else {},
                     "sid": p.sid,
                     "money": p.money, 
                     "betAmount": logic.current_bets.get(p.uid, 0),
-                    "entryBet": p.bet_amount, # 🔥 [FIX] Send raw bet amount (default 10000 for custom)
+                    "entryBet": p.bet_amount,
                     "major": getattr(p, 'major', 'Unknown'),
                     "year": getattr(p, 'year', 0)
                 })
-
-            print(f"📡 [IndianPoker] Sending update_state to {player.nickname}: Round={logic.current_round}, Phase={logic.phase}")
-            print(f"💰 [IndianPoker] Chips: {logic.chips}, Pot: {logic.pot}")
 
             socketio.emit("indian_poker:update_state", {
                 "round": logic.current_round,
                 "pot": logic.pot,
                 "chips": logic.chips,
                 "currentBets": logic.current_bets,
-                "currentTurnUid": current_player.uid,
+                "currentTurnUid": current_player.uid if current_player else None,
                 "phase": logic.phase,
                 "hands": hands_view,
                 "lastAction": logic.betting_history[-1] if logic.betting_history else None,
                 "timeLeft": 30,
-                "players": serialized_players # 🔥 Send players info
+                "players": serialized_players
             }, room=player.sid)
 
     def handle_action(self, room_id: str, action: str, data: dict, sid: str):
@@ -169,9 +168,17 @@ class IndianPokerHandler(GameHandler):
             
             # 🔥 [FIX] Transfer all chips to winner for "200:0" visual
             loser_chips = logic.chips.get(player.uid, 0)
+            print(f"💰 [Debug] Transferring chips. Loser ({player.nickname}): {loser_chips}, Pot: {logic.pot}")
+            
             logic.chips[opponent.uid] += loser_chips
             logic.chips[player.uid] = 0
             
+            # 🔥 [FIX] Also transfer pot to winner (198 -> 200)
+            logic.chips[opponent.uid] += logic.pot
+            logic.pot = 0
+            
+            print(f"💰 [Debug] Chips After Transfer: {logic.chips}")
+
             logic.winner = opponent
             logic.game_over = True
             logic.phase = 'GAME_OVER'
@@ -225,6 +232,9 @@ class IndianPokerHandler(GameHandler):
                 "character": getattr(winner, 'character', {})
             }
             print(f"🏁 [IndianPoker] Game Over. Winner: {winner_data}, Reason: {reason}")
+            
+            # 🔥 [FIX] Broadcast final state so frontend sees 200:0 chips
+            self._broadcast_state(room_id, gs)
 
             socketio.emit("game_over", {
                 "winner": winner_data,
