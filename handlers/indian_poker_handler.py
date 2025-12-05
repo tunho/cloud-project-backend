@@ -74,7 +74,9 @@ class IndianPokerHandler(GameHandler):
                     "sid": p.sid,
                     "money": p.money, 
                     "betAmount": logic.current_bets.get(p.uid, 0),
-                    "entryBet": p.bet_amount # 🔥 [FIX] Send raw bet amount (default 10000 for custom)
+                    "entryBet": p.bet_amount, # 🔥 [FIX] Send raw bet amount (default 10000 for custom)
+                    "major": getattr(p, 'major', 'Unknown'),
+                    "year": getattr(p, 'year', 0)
                 })
 
             print(f"📡 [IndianPoker] Sending update_state to {player.nickname}: Round={logic.current_round}, Phase={logic.phase}")
@@ -138,8 +140,39 @@ class IndianPokerHandler(GameHandler):
         
         if logic.game_over:
             self._handle_game_over(room_id, gs, logic)
+    def on_disconnect(self, room_id: str, sid: str):
+        print(f"🔌 [IndianPoker] on_disconnect: {sid} in room {room_id}")
+        self.leave_game(room_id, sid)
+
+    def leave_game(self, room_id: str, sid: str):
+        gs = get_room(room_id)
+        player = find_player_by_sid(gs, sid)
+        if not player:
+            return
+
+        print(f"🚪 [IndianPoker] Player {player.nickname} leaving game.")
+        logic = gs.game_state
+        
+        # If game is already over, just remove player (handled by base/general)
+        if logic.phase == 'GAME_OVER':
+            return
+
+        # Immediate Defeat Logic
+        # The leaver loses, the opponent wins.
+        opponent = next((p for p in gs.players if p.uid != player.uid), None)
+        
+        if opponent:
+            print(f"🏆 [IndianPoker] Opponent {opponent.nickname} wins by default.")
+            logic.winner = opponent
+            logic.game_over = True
+            logic.phase = 'GAME_OVER'
+            
+            # End game immediately
+            self._handle_game_over(room_id, gs, logic, reason="player_left")
+        else:
+            print("⚠️ [IndianPoker] No opponent found. Game ends without winner.")
+
     def _handle_timeout(self, room_id, gs):
-        # with socketio.app.app_context(): # 🔥 Removed incorrect app context usage
         logic = gs.game_state
         current_player = logic.get_current_player()
         
@@ -149,16 +182,16 @@ class IndianPokerHandler(GameHandler):
 
         print(f"⏰ Turn Timeout: {current_player.nickname}")
         
-        # Auto Fold on timeout
-        self._handle_bet(room_id, {'action': 'FOLD'}, current_player.sid)
+        # Auto Fold on timeout with 'DIE' label
+        self._handle_bet(room_id, {'action': 'FOLD', 'betLabel': 'DIE'}, current_player.sid)
+
     def _start_next_round(self, room_id: str, sid):
         gs = get_room(room_id)
         logic = gs.game_state
-        # Only host or auto-trigger? Let's allow any player to trigger for now or auto
         logic.start_round()
         self.start_turn(room_id, gs)
 
-    def _handle_game_over(self, room_id: str, gs, logic):
+    def _handle_game_over(self, room_id: str, gs, logic, reason="normal"):
         # Final Payout Logic
         winner = logic.winner
         if winner:
@@ -169,15 +202,23 @@ class IndianPokerHandler(GameHandler):
             from game_events import handle_winnings
             payout_results = handle_winnings(room_id)
             
-            # Determine Reason
-            reason = "normal"
-            if logic.current_round >= 10:
-                reason = "turn_limit"
-            elif any(p.money <= 0 for p in logic.players):
-                reason = "bankruptcy"
+            # Determine Reason if not provided
+            if reason == "normal":
+                if logic.current_round >= 10:
+                    reason = "turn_limit"
+                elif any(p.money <= 0 for p in logic.players):
+                    reason = "bankruptcy"
+
+            # Robust Winner Data
+            winner_data = {
+                "uid": winner.uid,
+                "nickname": getattr(winner, 'nickname', 'Unknown'),
+                "character": getattr(winner, 'character', {})
+            }
+            print(f"🏁 [IndianPoker] Game Over. Winner: {winner_data}, Reason: {reason}")
 
             socketio.emit("game_over", {
-                "winner": {"uid": winner.uid, "nickname": winner.nickname, "character": winner.character}, # 🔥 Send character too
+                "winner": winner_data,
                 "payouts": payout_results,
                 "reason": reason
             }, room=room_id)

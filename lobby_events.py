@@ -82,8 +82,10 @@ def on_join_queue(data):
                 money = user_data.get("money", 0)
                 nickname = user_data.get("nickname", nickname)
                 character = user_data.get("character", None) # 🔥 [FIX] Fetch character data
+                major = user_data.get("major", major) # 🔥 [FIX] Fetch major
+                year = user_data.get("year", year) # 🔥 [FIX] Fetch year
                 # Update other fields if needed
-                print(f"✅ Fetched fresh data for {nickname}: Money={money}, Character={character is not None}")
+                print(f"✅ Fetched fresh data for {nickname}: Money={money}, Char={character is not None}, Major={major}, Year={year}")
         except Exception as e:
             print(f"⚠️ Failed to fetch user data: {e}")
             character = None # Default if fetch fails

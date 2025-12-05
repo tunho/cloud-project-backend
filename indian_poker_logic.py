@@ -93,7 +93,7 @@ class IndianPokerLogic:
         if action == 'FOLD':
             self.phase = 'SHOWDOWN'
             self.winner = opponent # Opponent wins immediately
-            self.last_action = {'uid': uid, 'action': 'FOLD', 'amount': 0}
+            self.last_action = {'uid': uid, 'action': 'FOLD', 'amount': 0, 'bet_label': bet_label or 'DIE'}
             self._end_round(fold_winner=opponent)
             return True, "Fold"
 
