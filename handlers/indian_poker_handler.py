@@ -100,6 +100,9 @@ class IndianPokerHandler(GameHandler):
             self._handle_bet(room_id, data, sid)
         elif action == "next_round":
             self._start_next_round(room_id, sid)
+        elif action == "surrender":
+            # 🔥 [FIX] Handle explicit surrender (Exit button)
+            self.leave_game(room_id, sid)
 
     def _handle_bet(self, room_id: str, data: dict, sid: str):
         gs = get_room(room_id)
@@ -163,6 +166,12 @@ class IndianPokerHandler(GameHandler):
         
         if opponent:
             print(f"🏆 [IndianPoker] Opponent {opponent.nickname} wins by default.")
+            
+            # 🔥 [FIX] Transfer all chips to winner for "200:0" visual
+            loser_chips = logic.chips.get(player.uid, 0)
+            logic.chips[opponent.uid] += loser_chips
+            logic.chips[player.uid] = 0
+            
             logic.winner = opponent
             logic.game_over = True
             logic.phase = 'GAME_OVER'

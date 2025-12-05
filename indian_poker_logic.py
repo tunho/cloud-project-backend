@@ -21,6 +21,8 @@ class IndianPokerLogic:
         self.last_action = None # {uid, action, amount}
         self.min_bet = 1
         self.betting_history = [] # List of actions in current round
+        self.payout_results = None # 🔥 [FIX] Added for compatibility with game_events
+
 
         self.start_round()
 
@@ -94,6 +96,7 @@ class IndianPokerLogic:
             self.phase = 'SHOWDOWN'
             self.winner = opponent # Opponent wins immediately
             self.last_action = {'uid': uid, 'action': 'FOLD', 'amount': 0, 'bet_label': bet_label or 'DIE'}
+            self.betting_history.append(self.last_action) # 🔥 [FIX] Record FOLD action
             self._end_round(fold_winner=opponent)
             return True, "Fold"
 
@@ -115,13 +118,22 @@ class IndianPokerLogic:
 
             # If bets are equal, betting ends (unless it was the first bet of round)
             # Check (Call 0) is valid.
-            if self.current_bets[uid] == self.current_bets[opponent.uid] and len(self.betting_history) > 1:
-                 print("🃏 [Logic] Bets matched & History > 1 -> SHOWDOWN")
+            # 🔥 [FIX] Trigger Showdown if:
+            # 1. Bets match AND History > 1 (Standard)
+            # 2. Caller is All-in (Short Stack Call)
+            # 3. Opponent is All-in (Caller matched All-in)
+            
+            bets_match = self.current_bets[uid] == self.current_bets[opponent.uid]
+            caller_allin = self.chips[uid] == 0
+            opponent_allin = self.chips[opponent.uid] == 0
+            
+            if (bets_match and len(self.betting_history) > 1) or caller_allin or (bets_match and opponent_allin):
+                 print(f"🃏 [Logic] Showdown Triggered: Match={bets_match}, CallerAllIn={caller_allin}, OppAllIn={opponent_allin}")
                  self.phase = 'SHOWDOWN'
                  self._resolve_showdown()
             else:
-                print("🃏 [Logic] Switching Turn")
-                self.switch_turn()
+                 print(f"🃏 [Logic] Switching Turn: Match={bets_match}, CallerAllIn={caller_allin}, OppAllIn={opponent_allin}")
+                 self.switch_turn()
             return True, "Call"
 
         elif action == 'RAISE':
@@ -141,15 +153,28 @@ class IndianPokerLogic:
             return True, "Raise"
             
         elif action == 'ALLIN':
-            cost = self.chips[uid]
-            self.chips[uid] = 0
+            # 🔥 [FIX] Cap All-in at opponent's effective stack (No-Limit Rule)
+            # This prevents betting more than the opponent can possibly call.
+            opponent_total = self.chips[opponent.uid] + self.current_bets[opponent.uid]
+            my_total = self.chips[uid] + self.current_bets[uid]
+            
+            target_bet = min(my_total, opponent_total)
+            cost = target_bet - self.current_bets[uid]
+            
+            print(f"💰 [Logic] ALLIN: uid={uid}, MyTotal={my_total}, OppTotal={opponent_total}, Target={target_bet}, Cost={cost}")
+            print(f"💰 [Logic] Before: Chips={self.chips[uid]}, Bet={self.current_bets[uid]}, Pot={self.pot}")
+            
+            self.chips[uid] -= cost
             self.current_bets[uid] += cost
             self.pot += cost
+            
+            print(f"💰 [Logic] After: Chips={self.chips[uid]}, Bet={self.current_bets[uid]}, Pot={self.pot}")
+            
             self.last_action = {'uid': uid, 'action': 'ALLIN', 'amount': cost, 'bet_label': bet_label}
             self.betting_history.append({'uid': uid, 'action': 'ALLIN', 'amount': cost, 'bet_label': bet_label})
             
-            # If opponent is already all-in or bets matched, showdown
-            if self.chips[opponent.uid] == 0 or self.current_bets[uid] == self.current_bets[opponent.uid]:
+            # If bets matched (because opponent is already all-in or we just matched them), showdown
+            if self.current_bets[uid] == self.current_bets[opponent.uid]:
                 self.phase = 'SHOWDOWN'
                 self._resolve_showdown()
             else:
@@ -176,19 +201,27 @@ class IndianPokerLogic:
         self._end_round(winner)
 
     def _end_round(self, fold_winner=None):
+        print(f"💰 [Logic] _end_round called. Pot={self.pot}, FoldWinner={fold_winner.nickname if fold_winner else 'None'}")
+        print(f"💰 [Logic] Chips BEFORE: {self.chips}")
+        
         if fold_winner:
             # Fold winner takes all
             self.chips[fold_winner.uid] += self.pot
             self.winner = fold_winner
+            print(f"💰 [Logic] Fold Winner {fold_winner.nickname} takes pot {self.pot}")
         else:
             # Showdown
             if self.winner:
                 self.chips[self.winner.uid] += self.pot
+                print(f"💰 [Logic] Showdown Winner {self.winner.nickname} takes pot {self.pot}")
             else:
                 # Draw - Return bets (simplified) or split pot
                 half_pot = self.pot // 2
                 for p in self.players:
                     self.chips[p.uid] += half_pot
+                print(f"💰 [Logic] Draw! Pot split. Each gets {half_pot}")
+        
+        print(f"💰 [Logic] Chips AFTER: {self.chips}")
         
         # Check for game over (bankruptcy or max rounds)
         if any(c <= 0 for c in self.chips.values()) or self.current_round >= self.max_rounds:

@@ -612,7 +612,10 @@ def on_leave_game(data):
              if game_state and getattr(game_state, 'phase', 'INIT') != 'INIT':
                  game_started = True
         elif getattr(gs, 'game_type', 'davinci') == 'indian_poker':
-             game_started = True
+             # 🔥 [FIX] Delegate to IndianPokerHandler for consistent exit logic
+             from handlers.indian_poker_handler import IndianPokerHandler
+             IndianPokerHandler().leave_game(room_id, sid)
+             return
         else:
             # Davinci
             if game_state:
