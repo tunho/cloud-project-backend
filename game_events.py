@@ -69,18 +69,16 @@ def start_game_flow(room_id: str):
     print(f"🚀 게임 시작 루틴 실행: {room_id}")
 
     # 2. 게임 데이터 초기화 (로직)
+    # 2. 게임 데이터 초기화 (로직)
     if gs.game_type == 'omok':
         # 오목 초기화
-        if gs.game_state is None:
-            gs.game_state = OmokLogic(gs.players)
+        gs.game_state = OmokLogic(gs.players)
     elif gs.game_type == 'indian_poker':
-        if gs.game_state is None:
-            gs.game_state = IndianPokerLogic(gs.players)
+        gs.game_state = IndianPokerLogic(gs.players)
         gs.game_state.game_started = True # 🔥 [FIX] Mark game as started
     else:
         # 다빈치 초기화
-        if gs.game_state is None:
-            gs.game_state = GameLogic(gs.players)
+        gs.game_state = GameLogic(gs.players)
             
         prepare_tiles(gs.game_state)        # 검정/흰색 타일 섞기
         deal_initial_hands(gs.game_state)   # 플레이어들에게 초기 패 분배 (3개 또는 4개)
@@ -317,9 +315,11 @@ def eliminate_player(room_id: str, player: Player, reason: str = "eliminated"):
         
 
 
+        print(f"🏁 [Debug] Emitting game_over for {room_id}. Reason: {reason}")
         socketio.emit("game_over", {
             "winner": {"name": winner.nickname if winner else "Unknown"},
-            "payouts": payout_results
+            "payouts": payout_results,
+            "reason": reason # 🔥 [NEW] Send reason (disconnect/timeout)
         }, room=room_id)
         return True # 게임 종료됨
     

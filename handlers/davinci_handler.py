@@ -205,7 +205,7 @@ class DavinciHandler(GameHandler):
                 set_turn_phase(room_id, "POST_SUCCESS_GUESS")
                 gs.turn_start_time = time.time()
                 socketio.emit("game:prompt_continue", 
-                              {"timer": TURN_TIMER_SECONDS}, 
+                              {"timer": 60}, 
                               to=player.sid)
         else:
             start_next_turn(room_id)

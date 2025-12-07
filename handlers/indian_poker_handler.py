@@ -7,6 +7,12 @@ from utils import get_room, find_player_by_sid
 class IndianPokerHandler(GameHandler):
     def start_turn(self, room_id: str, gs, force_hidden=False):
         print(f"🎬 [Handler] start_turn called for {room_id}")
+        
+        # 🔥 [FIX] Cancel existing timer immediately to prevent zombie timers
+        if hasattr(gs, 'turn_timer') and gs.turn_timer:
+            gs.turn_timer.cancel()
+            gs.turn_timer = None
+
         logic = gs.game_state
         
         # 🔥 [FIX] Sync Logic Players with Room Players (Handle Reconnects/Replacements)
@@ -159,6 +165,11 @@ class IndianPokerHandler(GameHandler):
         if logic.phase == 'GAME_OVER':
             return
 
+        # 🔥 [FIX] Cancel timer when player leaves
+        if hasattr(gs, 'turn_timer') and gs.turn_timer:
+            gs.turn_timer.cancel()
+            gs.turn_timer = None
+
         # Immediate Defeat Logic
         # The leaver loses, the opponent wins.
         opponent = next((p for p in gs.players if p.uid != player.uid), None)
@@ -208,6 +219,11 @@ class IndianPokerHandler(GameHandler):
         self.start_turn(room_id, gs)
 
     def _handle_game_over(self, room_id: str, gs, logic, reason="normal"):
+        # 🔥 [FIX] Cancel timer on game over
+        if hasattr(gs, 'turn_timer') and gs.turn_timer:
+            gs.turn_timer.cancel()
+            gs.turn_timer = None
+
         # Final Payout Logic
         winner = logic.winner
         if winner:
@@ -233,6 +249,14 @@ class IndianPokerHandler(GameHandler):
             }
             print(f"🏁 [IndianPoker] Game Over. Winner: {winner_data}, Reason: {reason}")
             
+            # 🔥 [FIX] Force 200:0 display for early termination (Bankruptcy/Surrender)
+            # This ensures the UI shows a clean "Winner Takes All" state.
+            if logic.current_round < 10:
+                print(f"💰 [IndianPoker] Early termination (Round {logic.current_round}). Forcing 200:0 chips.")
+                logic.chips[winner.uid] = 200
+                logic.chips[loser.uid] = 0
+                logic.pot = 0 # Ensure pot is empty
+
             # 🔥 [FIX] Broadcast final state so frontend sees 200:0 chips
             self._broadcast_state(room_id, gs)
 
