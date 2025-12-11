@@ -9,4 +9,12 @@ except ImportError:
 
 # SocketIO 객체를 생성
 # 🔥 [FIX] Force threading mode to ensure compatibility with threading.Timer (no gevent)
-socketio = SocketIO(async_mode='threading')
+# 🔥 [NEW] Redis Message Queue Support for Auto Scaling
+import os
+redis_url = os.environ.get('REDIS_URL')
+if redis_url:
+    print(f"🚀 Using Redis Message Queue: {redis_url}")
+    socketio = SocketIO(async_mode='threading', message_queue=redis_url)
+else:
+    print("⚠️ No REDIS_URL found. Using in-memory mode (Not suitable for multi-instance).")
+    socketio = SocketIO(async_mode='threading')

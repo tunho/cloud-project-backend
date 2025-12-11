@@ -12,9 +12,12 @@ dataclasses==0.6
 dnspython==2.8.0
 eventlet==0.40.3
 firebase_admin==7.1.0
+python-dotenv
+boto3
+redis==7.1.0
 Flask==3.1.2
 flask-cors==6.0.1
-Flask-SocketIO==5.5.1
+Flask-SocketIO==5.14.3
 google-api-core==2.28.1
 google-auth==2.43.0
 google-cloud-core==2.5.0
