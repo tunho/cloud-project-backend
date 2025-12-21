@@ -72,6 +72,8 @@ def on_join_queue(data):
     if not uid:
         return
 
+    character = None # 🔥 [FIX] Initialize character to prevent UnboundLocalError
+
     # 🔥 [FIX] Fetch fresh user data from Firestore
     if FIREBASE_AVAILABLE:
         try:
