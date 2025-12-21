@@ -31,6 +31,10 @@ socketio.init_app(app, cors_allowed_origins="*")
 def health_check():
     return "OK", 200
 
+@app.route("/")
+def index():
+    return "JBNU Game Server is Running! (Port 8000)", 200
+
 # 🔥 [NEW] Leaderboard API
 from flask import jsonify
 try:
@@ -46,7 +50,7 @@ except Exception as e:
 # This avoids gRPC conflicts with the Admin SDK in the Gunicorn environment.
 
 if __name__ == "__main__":
-    print("🚀 서버 실행 (http://localhost:5000)")
+    print("🚀 서버 실행 (http://localhost:8000)")
     # 🔥 [FIX] allow_unsafe_werkzeug=True to prevent "write() before start_response" error
     # 🔥 [FIX] use_reloader=False to prevent thread conflict with Werkzeug
-    socketio.run(app, host="0.0.0.0", port=5000, debug=True, allow_unsafe_werkzeug=True, use_reloader=False)
+    socketio.run(app, host="0.0.0.0", port=8000, debug=True, allow_unsafe_werkzeug=True, use_reloader=False)

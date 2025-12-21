@@ -14,7 +14,7 @@ import os
 redis_url = os.environ.get('REDIS_URL')
 if redis_url:
     print(f"🚀 Using Redis Message Queue: {redis_url}")
-    socketio = SocketIO(async_mode='threading', message_queue=redis_url)
+    socketio = SocketIO(async_mode='threading', message_queue=redis_url, cors_allowed_origins="*")
 else:
     print("⚠️ No REDIS_URL found. Using in-memory mode (Not suitable for multi-instance).")
-    socketio = SocketIO(async_mode='threading')
+    socketio = SocketIO(async_mode='threading', cors_allowed_origins="*")

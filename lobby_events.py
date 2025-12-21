@@ -43,7 +43,8 @@ def on_join_queue(data):
     bet_amount = int(data.get("betAmount", 10000))
     game_type = data.get("gameType", "davinci").lower() # Default to davinci
     
-    print(f"🔍 [DEBUG] on_join_queue received data: {data}") # 🔥 [DEBUG] Check betAmount
+    print(f"🔍 [DEBUG] on_join_queue received data: {data}") 
+    print(f"🔍 [DEBUG] SID: {sid}, GameType: {game_type}")
     
     if game_type not in queues:
         print(f"⚠️ Invalid game_type '{game_type}' requested. Defaulting to 'davinci'.")
